@@ -1,0 +1,23 @@
+# Binaries
+nucleagent-executor-*
+
+# Config
+*.local.yaml
+*.local.env
+config.local.yaml
+
+# Runtime data
+data/
+log/
+task_sessions.json
+
+# Dependencies
+vendor/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
