@@ -21,6 +21,7 @@ go run main.go        # 启动（需要 core 后端在运行）
 - S2S 认证：注册/心跳/WebSocket 连接均携带 `X-Executor-Token`（由 core 签发）
 - Session 持久化用 JSON 文件（`task_sessions.json`），不用数据库
 - LLM 调用通过 core 的 LLM Proxy 临时 Key，不直接持有 API key
+- CORS：`cors.mode: strict-whitelist`，通过环境变量配置允许的前端来源（WEB_FRONTEND_URL + EXECUTOR_FRONTEND_URL），支持分布式部署
 
 ## Addons
 
