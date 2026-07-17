@@ -2,5 +2,5 @@ go 1.25
 
 use (
 	.
-	./prism-fusion/src/server
+	../../../../prism-fusion/src/server
 )

@@ -79,5 +79,5 @@ require (
 
 replace (
 	github.com/nucleagent/nucleagent-shared => ../../../../nucleagent-shared
-	whitestone.top/prism-fusion => ./prism-fusion/src/server
+	whitestone.top/prism-fusion => ../../../../prism-fusion/src/server
 )
