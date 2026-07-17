@@ -63,4 +63,8 @@ nucleagent:
   core-url: '${CORE_URL:-http://localhost:6680}'
   data-dir: '${DATA_DIR:-./data}'
   max-sessions: 10
+  executor-token: '${EXECUTOR_TOKEN}'   # S2S 携带 X-Executor-Token（注册/心跳/WebSocket，与 core 共享）
+  backend: 'opencode'                   # 默认执行后端（opencode / hermes）
+  session:
+    file: './task_sessions.json'        # TaskSession JSON 持久化文件（session addon 用）
 
