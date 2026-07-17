@@ -45,7 +45,18 @@ mysql:
 
 # 跨域配置
 cors:
-  mode: 'allow-all'
+  mode: 'strict-whitelist'
+  whitelist:
+    - allow-origin: '${WEB_FRONTEND_URL}'
+      allow-methods: 'GET,POST,PUT,DELETE,OPTIONS'
+      allow-headers: 'Content-Type,AccessToken,X-CSRF-Token,Authorization,Token,X-Token,X-User-Id,auth_token'
+      expose-headers: 'Content-Length,Access-Control-Allow-Origin,Access-Control-Allow-Headers,Content-Type'
+      allow-credentials: true
+    - allow-origin: '${EXECUTOR_FRONTEND_URL}'
+      allow-methods: 'GET,POST,PUT,DELETE,OPTIONS'
+      allow-headers: 'Content-Type,AccessToken,X-CSRF-Token,Authorization,Token,X-Token,X-User-Id,auth_token'
+      expose-headers: 'Content-Length,Access-Control-Allow-Origin,Access-Control-Allow-Headers,Content-Type'
+      allow-credentials: true
 
 # Nucleagent 配置
 nucleagent:
