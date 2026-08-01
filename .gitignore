@@ -1,33 +1,40 @@
-# Binaries
+# Binaries / build output（二进制产物）
+nucleagent-executor
 nucleagent-executor-*
+nucleagent-executor.exe
+app/src/server/nucleagent-executor
+*.exe
+*.dll
+*.so
+*.dylib
 
-# Config
+# Frontend build output（app/src/web 前端构建产物）
+app/src/web/dist/
+app/src/web/node_modules/
+app/src/web/.vite/
+
+# Go dependencies
+app/src/server/vendor/
+
+# Config（本地密钥，勿提交）
 *.local.yaml
 *.local.env
 config.local.yaml
+.env
+.env.local
 
-# Runtime data
+# Runtime data（运行时数据）
 data/
 log/
+*.log
 task_sessions.json
-
-# Dependencies
-vendor/
+instance_id
 
 # IDE
 .vscode/
 .idea/
+*.swp
 
 # OS
 .DS_Store
 Thumbs.db
-
-# 构建产物 / 本地运行时
-/nucleagent-core
-/nucleagent-auth
-/nucleagent-executor
-app/src/web/dist/
-app/src/web/node_modules/
-.env
-.env.local
-*.local
