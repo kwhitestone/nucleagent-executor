@@ -21,3 +21,13 @@ vendor/
 # OS
 .DS_Store
 Thumbs.db
+
+# 构建产物 / 本地运行时
+/nucleagent-core
+/nucleagent-auth
+/nucleagent-executor
+app/src/web/dist/
+app/src/web/node_modules/
+.env
+.env.local
+*.local

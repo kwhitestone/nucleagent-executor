@@ -1,0 +1,147 @@
+// Package engineclient 封装 executor -> core 的 HTTP 注册。
+//
+// executor 启动后向 core 发起注册（携带 ExecutorToken），core 返回 wsUrl，
+// executor 随后用 wsUrl 建立 WebSocket。注册失败时按间隔重试。
+package engineclient
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Client core 注册客户端。
+type Client struct {
+	coreURL          string
+	executorToken    string
+	deviceID         string
+	instanceID       string
+	deviceName       string
+	http             *http.Client
+}
+
+// NewClient 构造注册客户端。
+func NewClient(coreURL, executorToken, deviceID, instanceID, deviceName string) *Client {
+	return &Client{
+		coreURL:       coreURL,
+		executorToken: executorToken,
+		deviceID:      deviceID,
+		instanceID:    instanceID,
+		deviceName:    deviceName,
+		http:          &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+// RegisterRequest 注册请求体（对齐 core s2s addon 期望）。
+type RegisterRequest struct {
+	DeviceID     string   `json:"deviceId"`
+	InstanceID   string   `json:"instanceId,omitempty"`
+	DeviceName   string   `json:"deviceName,omitempty"`
+	BackendType  string   `json:"backendType,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Token        string   `json:"-"` // 走 header，不落 body
+}
+
+// RegisterResponse 注册响应体。WSURL 是 core 下发的 WebSocket 地址。
+type RegisterResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		WSURL     string    `json:"wsUrl"`
+		DeviceID  string    `json:"deviceId,omitempty"`
+		ExpiresAt time.Time `json:"expiresAt,omitempty"`
+	} `json:"data"`
+}
+
+// Register 发起注册，返回 wsUrl。retryUntil 在 ctx 取消前按间隔重试。
+func (c *Client) Register(ctx context.Context, capabilities []string, retry time.Duration) (string, error) {
+	if c.executorToken == "" {
+		return "", fmt.Errorf("engineclient: EXECUTOR_TOKEN not set")
+	}
+	body, err := json.Marshal(RegisterRequest{
+		DeviceID:     c.deviceID,
+		InstanceID:   c.instanceID,
+		DeviceName:   c.deviceName,
+		Capabilities: capabilities,
+	})
+	if err != nil {
+		return "", err
+	}
+	url := c.coreURL + "/api/v1/addons/s2s/executor/register"
+
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return "", fmt.Errorf("engineclient: register cancelled: %w (last err: %v)", ctx.Err(), lastErr)
+			}
+			return "", ctx.Err()
+		default:
+		}
+
+		wsURL, err := c.tryRegister(ctx, url, body)
+		if err == nil {
+			return wsURL, nil
+		}
+		fmt.Fprintf(os.Stderr, "engineclient: register attempt failed (retry in %v): %v\n", retry, err)
+		lastErr = err
+		// 等待重试间隔或 ctx 取消。
+		t := time.NewTimer(retry)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return "", fmt.Errorf("engineclient: register cancelled: %w (last err: %v)", ctx.Err(), lastErr)
+		case <-t.C:
+		}
+	}
+}
+
+// tryRegister 执行单次注册请求。
+func (c *Client) tryRegister(ctx context.Context, url string, body []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Executor-Token", c.executorToken)
+	req.Header.Set("X-Request-ID", uuid.NewString())
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("register request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read register response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("register http %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+
+	var out RegisterResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("register unmarshal: %w", err)
+	}
+	if out.Code != 0 || out.Data.WSURL == "" {
+		return "", fmt.Errorf("register rejected: code=%d msg=%s", out.Code, out.Message)
+	}
+	return out.Data.WSURL, nil
+}
+
+// truncate 截断字符串到 max 字节，超出加省略号。
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
