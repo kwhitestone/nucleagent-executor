@@ -1,11 +1,12 @@
 import { createApp, type App as VueApp } from "vue";
 import { createPinia } from "pinia";
-import ElementPlus from "element-plus";
-import "element-plus/dist/index.css";
 
 import App from "./App.vue";
 import router from "./router";
 import i18n from "./i18n";
+// Aurora 设计 token 必须先于 global.css 引入（global.css 内的规则依赖这些变量）。
+// aurora.css 由 nucleagent-deploy/scripts/sync-design-tokens.sh 从设计稿生成，勿手改。
+import "./styles/aurora.css";
 import "./styles/global.css";
 import "./styles/dashboard.css";
 
@@ -18,7 +19,7 @@ function mount() {
   app.use(createPinia());
   app.use(router);
   app.use(i18n);
-  app.use(ElementPlus);
+  // 移除 Element Plus：设计稿全自绘，EP 样式与 Aurora 冲突。提示改用 useToast。
   app.mount(`#${MOUNT_ID}`);
 }
 

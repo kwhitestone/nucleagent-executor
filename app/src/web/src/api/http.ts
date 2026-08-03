@@ -7,7 +7,7 @@ import type { ApiEnvelope } from "./types";
  *
  * - baseURL comes from VITE_EXECUTOR_BACKEND_URL when set (e.g. a deployed
  *   executor backend); otherwise it is "/api" which the Vite dev server
- *   proxies to the prism-fusion backend on :6690 (see vite.config.ts). In
+ *   proxies to the prism-fusion backend on :26690 (see vite.config.ts). In
  *   production a reverse proxy handles the same path.
  * - The executor backend exposes no auth routes (see AGENTS.md), so no JWT is
  *   attached here.

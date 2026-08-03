@@ -1,7 +1,7 @@
 # 系统配置
 system:
   env: 'local'
-  addr: 6690
+  addr: 26690
 
 # Zap日志配置
 zap:
@@ -33,7 +33,7 @@ cors:
 # Nucleagent 配置
 # executor 不连数据库、不暴露 auth 路由；S2S 用 X-Executor-Token，LLM 经 core Proxy。
 nucleagent:
-  core-url: '${CORE_URL:-http://localhost:6680}'
+  core-url: '${CORE_URL:-http://localhost:26680}'
   data-dir: '${DATA_DIR:-./data}'
   max-sessions: 10
   executor-token: '${EXECUTOR_TOKEN}'   # S2S 携带 X-Executor-Token（注册/心跳/WebSocket，与 core 共享）

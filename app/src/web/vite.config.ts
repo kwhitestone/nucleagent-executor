@@ -3,13 +3,13 @@ import vue from "@vitejs/plugin-vue";
 import { resolve } from "node:path";
 
 // 端口、后端地址、跨域目标全部可通过环境变量配置（.env 或 shell）：
-//   EXECUTOR_WEB_PORT (默认 6698)             — dev server 端口
-//   EXECUTOR_BACKEND_URL (默认 http://localhost:6690) — /api 代理目标（executor 后端）
+//   EXECUTOR_WEB_PORT (默认 26698)             — dev server 端口
+//   EXECUTOR_BACKEND_URL (默认 http://localhost:26690) — /api 代理目标（executor 后端）
 // 支持微前端：作为 micro-app 子应用运行时，端口由壳应用编排注入。
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const port = Number(env.EXECUTOR_WEB_PORT ?? env.PORT ?? 6698);
-  const backendUrl = env.EXECUTOR_BACKEND_URL ?? "http://localhost:6690";
+  const port = Number(env.EXECUTOR_WEB_PORT ?? env.PORT ?? 26698);
+  const backendUrl = env.EXECUTOR_BACKEND_URL ?? "http://localhost:26690";
 
   return {
     plugins: [vue()],

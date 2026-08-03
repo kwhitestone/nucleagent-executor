@@ -22,9 +22,7 @@ const { t } = useI18n();
       <div class="device-card__row">
         <dt>{{ t("executor.backendType") }}</dt>
         <dd>
-          <el-tag size="small" type="info" effect="plain" round>
-            {{ info.backendType }}
-          </el-tag>
+          <span class="device-card__tag">{{ info.backendType }}</span>
         </dd>
       </div>
     </dl>
@@ -78,5 +76,15 @@ const { t } = useI18n();
 .device-card__mono {
   font-family: var(--na-font-mono);
   word-break: break-all;
+}
+
+.device-card__tag {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: var(--r-full);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
 }
 </style>

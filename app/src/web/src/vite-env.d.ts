@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  /** Executor backend base URL (e.g. http://localhost:6690). Falls back to /api. */
+  /** Executor backend base URL (e.g. http://localhost:26690). Falls back to /api. */
   readonly VITE_EXECUTOR_BACKEND_URL?: string;
   /** Logical device id (config.yaml nucleagent.device-id). */
   readonly VITE_EXECUTOR_DEVICE_ID?: string;

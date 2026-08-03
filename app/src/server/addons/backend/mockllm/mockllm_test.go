@@ -120,7 +120,7 @@ func TestExtractContent(t *testing.T) {
 
 // TestMockLLMNoProxyKeyFallsBack 验证无 proxy key 时回退模拟（不报错）。
 func TestMockLLMNoProxyKeyFallsBack(t *testing.T) {
-	b := New("http://localhost:6680") // 有 coreURL 但 req 无 key
+	b := New("http://localhost:26680") // 有 coreURL 但 req 无 key
 	r := &captureReporter{}
 	req := &a2a.ExecutionRequest{
 		ConversationID: 3,

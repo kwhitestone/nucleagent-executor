@@ -45,7 +45,7 @@ go run main.go        # 启动（需要 core 后端在运行）
 
 ```yaml
 nucleagent:
-  core-url: 'http://localhost:6680'       # core 后端地址（注册/心跳用）
+  core-url: 'http://localhost:26680'       # core 后端地址（注册/心跳用）
   executor-token: '${EXECUTOR_TOKEN}'     # S2S 认证 token（X-Executor-Token），注册时校验
   backend: 'opencode'                      # 默认执行后端（opencode / hermes）
   sandbox:

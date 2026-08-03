@@ -16,7 +16,7 @@ import (
 
 // Config executor 业务配置（对应 config.yaml 的 nucleagent 段）。
 type Config struct {
-	CoreURL        string // core API 地址（http://localhost:6680）
+	CoreURL        string // core API 地址（http://localhost:26680）
 	DataDir        string // 数据目录（日志/session 等）
 	MaxSessions    int    // 最大并发 session
 	ExecutorToken  string // S2S 校验 X-Executor-Token（与 core 共享）
@@ -52,7 +52,7 @@ func Load() (*Config, error) {
 	}
 
 	// 展开环境变量（vp.AutomaticEnv 已开，但显式默认值更稳）。
-	cfg.CoreURL = envDefault("CORE_URL", cfg.CoreURL, "http://localhost:6680")
+	cfg.CoreURL = envDefault("CORE_URL", cfg.CoreURL, "http://localhost:26680")
 	cfg.DataDir = envDefault("DATA_DIR", cfg.DataDir, "./data")
 	cfg.SessionFile = envDefault("SESSION_FILE", cfg.SessionFile, filepath.Join(cfg.DataDir, "task_sessions.json"))
 	cfg.ExecutorToken = os.Getenv("EXECUTOR_TOKEN")

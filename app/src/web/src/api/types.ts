@@ -1,7 +1,7 @@
 /**
  * Shared API type definitions matching the nucleagent-executor backend contract.
  *
- * The executor is a prism-fusion service on :6690. Most endpoints (register,
+ * The executor is a prism-fusion service on :26690. Most endpoints (register,
  * heartbeat, WebSocket) are server-to-server and not exposed to this frontend.
  * The web UI only consumes two health endpoints:
  *   GET /health                           — framework health check (plain text/JSON)

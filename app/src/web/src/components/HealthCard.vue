@@ -36,6 +36,14 @@ const healthType = computed<"success" | "danger" | "info">(() => {
   if (isHealthy.value === null) return "info";
   return isHealthy.value ? "success" : "danger";
 });
+
+/** 映射到原生 tag 的 class（替代 el-tag 的 type）。 */
+const healthTagClass = computed(() => ({
+  "health-card__tag": true,
+  "health-card__tag--success": healthType.value === "success",
+  "health-card__tag--danger": healthType.value === "danger",
+  "health-card__tag--info": healthType.value === "info",
+}));
 </script>
 
 <template>
@@ -43,9 +51,7 @@ const healthType = computed<"success" | "danger" | "info">(() => {
     <div class="health-card__top">
       <div class="health-card__metric">
         <span class="health-card__label">{{ t("executor.healthTitle") }}</span>
-        <el-tag :type="healthType" size="large" effect="light" round>
-          {{ healthLabel }}
-        </el-tag>
+        <span :class="healthTagClass">{{ healthLabel }}</span>
       </div>
       <div class="health-card__divider" />
       <div class="health-card__metric health-card__metric--concurrency">
@@ -60,13 +66,9 @@ const healthType = computed<"success" | "danger" | "info">(() => {
             {{ t("executor.concurrencyUnit") }}
           </span>
         </div>
-        <el-progress
-          :percentage="concurrencyPct"
-          :show-text="false"
-          :stroke-width="6"
-          color="#14b8a6"
-          class="health-card__bar"
-        />
+        <div class="health-card__bar">
+          <div class="health-card__bar-fill" :style="{ width: `${concurrencyPct}%` }" />
+        </div>
       </div>
     </div>
   </section>
@@ -134,5 +136,28 @@ const healthType = computed<"success" | "danger" | "info">(() => {
 .health-card__bar {
   margin-top: 4px;
   max-width: 220px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: var(--bg-subtle);
+  overflow: hidden;
 }
+
+.health-card__bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--grad-teal-indigo);
+  transition: width 0.4s var(--ease);
+}
+
+/* 原生 tag（替代 el-tag） */
+.health-card__tag {
+  display: inline-block;
+  padding: 4px 14px;
+  border-radius: var(--r-full);
+  font-size: 13px;
+  font-weight: 600;
+}
+.health-card__tag--success { background: rgba(16, 185, 129, 0.15); color: var(--emerald-500); }
+.health-card__tag--danger { background: rgba(244, 63, 94, 0.15); color: var(--rose-500); }
+.health-card__tag--info { background: var(--bg-subtle); color: var(--text-tertiary); }
 </style>

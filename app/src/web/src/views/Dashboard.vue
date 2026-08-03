@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { ElMessage } from "element-plus";
 import { getHealth, getSessionHealth } from "@/api/executor";
 import type { SessionHealth } from "@/api/types";
 import { getDeviceInfo } from "@/config/device";
 import { mockSessions } from "@/mock/sessions";
-import LanguageSwitcher from "@/components/LanguageSwitcher.vue";
+import { toast } from "@/composables/useToast";
 import HealthCard from "@/components/HealthCard.vue";
 import DeviceInfoCard from "@/components/DeviceInfoCard.vue";
 import SessionTable from "@/components/SessionTable.vue";
@@ -25,13 +24,11 @@ async function loadHealth(): Promise<void> {
   try {
     const [healthStr, sess] = await Promise.all([
       getHealth().catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : t("executor.loadHealthFailed");
-        ElMessage.error(msg);
+        toast.error(err instanceof Error ? err.message : t("executor.loadHealthFailed"));
         return null;
       }),
       getSessionHealth().catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : t("executor.loadSessionHealthFailed");
-        ElMessage.error(msg);
+        toast.error(err instanceof Error ? err.message : t("executor.loadSessionHealthFailed"));
         return null;
       }),
     ]);
@@ -46,22 +43,12 @@ onMounted(loadHealth);
 </script>
 
 <template>
-  <div v-loading="loading" class="dashboard">
-    <header class="dashboard__header">
-      <div class="dashboard__brand">
-        <span class="dashboard__brand-mark">E</span>
-        <div class="dashboard__brand-text">
-          <h1 class="dashboard__title">{{ t("executor.title") }}</h1>
-          <p class="dashboard__subtitle">{{ t("executor.subtitle") }}</p>
-        </div>
-      </div>
-      <div class="dashboard__actions">
-        <LanguageSwitcher />
-        <el-button class="dashboard__refresh" @click="loadHealth">
-          {{ t("common.refresh") }}
-        </el-button>
-      </div>
-    </header>
+  <div class="dashboard">
+    <div class="dashboard__toolbar">
+      <button class="dashboard__refresh" type="button" @click="loadHealth">
+        {{ t("common.refresh") }}
+      </button>
+    </div>
 
     <main class="dashboard__body">
       <HealthCard
