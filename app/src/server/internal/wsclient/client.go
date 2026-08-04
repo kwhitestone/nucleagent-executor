@@ -83,6 +83,9 @@ func (c *Client) Run(ctx context.Context, reconnect time.Duration) error {
 func (c *Client) runOnce(ctx context.Context) error {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
+		// 显式不走系统代理：executor → core 的 WebSocket 是 localhost 互调，
+		// 宿主机的 HTTP_PROXY 会导致连不上（与 engineclient 同理）。
+		Proxy: nil,
 	}
 	hdr := map[string][]string{}
 	if c.token != "" {

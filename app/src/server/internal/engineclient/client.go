@@ -35,7 +35,12 @@ func NewClient(coreURL, executorToken, deviceID, instanceID, deviceName string) 
 		deviceID:      deviceID,
 		instanceID:    instanceID,
 		deviceName:    deviceName,
-		http:          &http.Client{Timeout: 15 * time.Second},
+		// 显式不走系统代理：executor → core 是 localhost 互调，若宿主机有
+		// HTTP_PROXY 环境变量，Go 默认 Transport 会把请求发到代理端口导致 502。
+		http: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: &http.Transport{Proxy: nil},
+		},
 	}
 }
 
