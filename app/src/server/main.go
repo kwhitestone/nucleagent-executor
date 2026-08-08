@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/url"
 	stdruntime "runtime"
 	"os/signal"
 	"syscall"
@@ -105,7 +106,10 @@ func runExecutor(ctx context.Context, cfg *config.Config) {
 		global.PRISM_LOG.Error("executor register failed, exiting", zap.Error(err))
 		return
 	}
-	global.PRISM_LOG.Info("registered to core", zap.String("wsUrl", wsURL))
+	// core 下发的 wsUrl 基于其自身配置（常为 localhost），在容器/跨网场景不可达。
+	// 注册既然成功，说明 cfg.CoreURL 可达——WS 走同一 host 必然可达，故用它重写 host。
+	wsURL = rewriteWSHost(wsURL, cfg.CoreURL)
+	global.PRISM_LOG.Info("registered to core", zap.String("wsUrl", wsURL), zap.String("coreUrl", cfg.CoreURL))
 
 	// 建 WS 客户端，handler = runtime。
 	ws := wsclient.NewClient(wsURL, cfg.ExecutorToken, handshake, rt)
@@ -144,6 +148,37 @@ type nilSender struct{}
 
 func (nilSender) Send(string, any) error                              { return nil }
 func (nilSender) SendWithRequest(string, string, any) error           { return nil }
+
+// rewriteWSHost 把 core 下发的 wsURL 的 host:port 换成 coreURL 的 host:port。
+//
+// core 的 buildWSURLFromConfig 返回的 wsUrl 基于其自身配置（常 localhost），
+// 在 executor 跨网/容器场景不可达。注册成功意味着 coreURL 可达，WS 走同一
+// host:port 必然可达，故只换 host、保留 path/query。
+// 例：wsURL=ws://localhost:26680/api/...，coreURL=http://host.docker.internal:26680
+//     → ws://host.docker.internal:26680/api/...
+func rewriteWSHost(wsURL, coreURL string) string {
+	if wsURL == "" || coreURL == "" {
+		return wsURL
+	}
+	wu, err := url.Parse(wsURL)
+	if err != nil || wu.Host == "" {
+		return wsURL
+	}
+	cu, err := url.Parse(coreURL)
+	if err != nil || cu.Host == "" {
+		return wsURL
+	}
+	// 同 host 无需改（裸机 dev 场景，core 与 executor 同机）。
+	if wu.Host == cu.Host {
+		return wsURL
+	}
+	wu.Host = cu.Host
+	wu.Scheme = "ws"
+	if cu.Scheme == "https" {
+		wu.Scheme = "wss"
+	}
+	return wu.String()
+}
 
 func initializeSystem() {
 	global.PRISM_VP = core.Viper()
