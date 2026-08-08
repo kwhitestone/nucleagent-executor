@@ -37,6 +37,10 @@ nucleagent:
   data-dir: '${DATA_DIR:-./data}'
   max-sessions: 10
   executor-token: '${EXECUTOR_TOKEN}'   # S2S 携带 X-Executor-Token（注册/心跳/WebSocket，与 core 共享）
-  backend: 'opencode'                   # 默认执行后端（opencode / hermes）
+  backend: 'hermes'                     # 默认执行后端（hermes / opencode / mock-llm）
+  hermes:                               # Hermes Agent 后端配置（backend=hermes 时生效）
+    bin: '${HERMES_BIN:-hermes}'        # hermes 可执行文件（容器内 PATH；裸跑指向 venv 的 hermes）
+    workdir: '${HERMES_WORKDIR:-./data/hermes}'  # HERMES_HOME（数据/会话目录）
+    host: '127.0.0.1'                   # hermes serve 监听 host
   session:
     file: './task_sessions.json'        # TaskSession JSON 持久化文件（session addon 用）

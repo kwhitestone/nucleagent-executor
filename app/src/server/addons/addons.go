@@ -8,6 +8,8 @@ import (
 	_ "nucleagent-executor/addons/backend/mockllm"
 	// OpenCode 后端骨架（占位，真实桥接待接入）
 	_ "nucleagent-executor/addons/backend/opencode"
+	// Hermes 后端（hermes serve WS gateway 桥接）
+	_ "nucleagent-executor/addons/backend/hermes"
 	// TaskSession 管理（内存 + JSON 文件）
 	_ "nucleagent-executor/addons/session"
 )

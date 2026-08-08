@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"nucleagent-executor/addons/backend"
+	"nucleagent-executor/addons/backend/hermes"
 	"nucleagent-executor/addons/session"
 	"nucleagent-executor/internal/config"
 	"nucleagent-executor/internal/engineclient"
@@ -69,6 +70,15 @@ func runExecutor(ctx context.Context, cfg *config.Config) {
 			executors = append(executors, a2a.DesktopExecutor{ID: name, Type: name, DisplayName: name, Streaming: true})
 		}
 	}
+
+	// 注入 Hermes 后端配置（hermes.go 的包级 conf，供 supervisor 写 env、
+	// managed config 拼 base_url）。在 NewRunner 之前完成，确保 Run 时就绪。
+	hermes.Configure(hermes.Config{
+		Bin:     cfg.HermesBin,
+		Workdir: cfg.HermesWorkdir,
+		Host:    cfg.HermesHost,
+		CoreURL: cfg.CoreURL,
+	})
 
 	// runner + runtime。
 	runner := backend.NewRunner(backend.Default)
