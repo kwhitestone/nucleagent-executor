@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 	"whitestone.top/prism-fusion/global"
@@ -83,13 +84,16 @@ func Load() (*Config, error) {
 		cfg.HeartbeatInterval = "10s"
 	}
 	// Hermes 后端默认值。
-	if cfg.HermesBin == "" {
-		cfg.HermesBin = envDefault("HERMES_BIN", "", "hermes") // 容器内 PATH 查找；裸跑需显式指向 venv
+	// 环境变量优先（config.yaml 的 ${VAR:-default} 不一定被 viper 展开，故显式覆盖）。
+	cfg.HermesBin = envDefault("HERMES_BIN", cfg.HermesBin, "hermes")
+	if isUnexpanded(cfg.HermesBin) { // viper 没展开 ${...}，回退默认
+		cfg.HermesBin = "hermes"
 	}
-	if cfg.HermesWorkdir == "" {
-		cfg.HermesWorkdir = filepath.Join(cfg.DataDir, "hermes") // HERMES_HOME
+	cfg.HermesWorkdir = envDefault("HERMES_WORKDIR", cfg.HermesWorkdir, filepath.Join(cfg.DataDir, "hermes"))
+	if isUnexpanded(cfg.HermesWorkdir) {
+		cfg.HermesWorkdir = filepath.Join(cfg.DataDir, "hermes")
 	}
-	if cfg.HermesHost == "" {
+	if cfg.HermesHost == "" || isUnexpanded(cfg.HermesHost) {
 		cfg.HermesHost = "127.0.0.1"
 	}
 
@@ -123,4 +127,10 @@ func envDefault(key, cur, fallback string) string {
 		return cur
 	}
 	return fallback
+}
+
+// isUnexpanded 判断 viper 是否原样返回了未展开的 ${VAR:-...} 占位符。
+// 用于在 AutomaticEnv 未覆盖时回退到默认值。
+func isUnexpanded(s string) bool {
+	return strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}")
 }

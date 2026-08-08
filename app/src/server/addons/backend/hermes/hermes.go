@@ -72,15 +72,16 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 		return a2a.ExecutionResult{StepID: req.StepID, Status: "failed", Error: msg}
 	}
 
-	// 1. 确保 hermes 进程就绪。
-	proc, err := sup.ensureStarted()
-	if err != nil {
-		return fail(fmt.Sprintf("hermes not ready: %v", err))
-	}
-
-	// 2. 写 managed 配置（LLM 凭据每次 Run 都写——临时 key 会轮换）。
+	// 1. 先写 managed 配置（LLM 凭据每次 Run 都写——临时 key 会轮换）。
 	if err := writeManagedConfig(req); err != nil {
 		return fail(fmt.Sprintf("write managed config: %v", err))
+	}
+
+	// 2. 重启 hermes 进程（杀旧启新），让它读取刚写好的 managed config。
+	// hermes 在 agent init 缓存 provider+api_key，不重启会复用首个 key。
+	proc, err := sup.startFresh()
+	if err != nil {
+		return fail(fmt.Sprintf("hermes not ready: %v", err))
 	}
 
 	// 3. 连 gateway WS。
@@ -122,13 +123,15 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 func (b *HermesBackend) Kill(ctx context.Context, session a2a.TaskSession) error { return nil }
 
 // createSession 调 session.create，返回 session_id。
+//
+// 注意：不传 model 参数。传 model 会设 model_override，使 hermes 跳过
+// _sync_agent_model_with_config（client.rs:224-227），从而不读 managed config
+// 里的 model.api_key —— 那是 LLM proxy 临时 key 的唯一注入点。model + api_key
+// 都已写在 managed config.yaml，让 hermes 读它即可。
 func createSession(ctx context.Context, client *GatewayClient, req *a2a.ExecutionRequest) (string, error) {
 	params := map[string]any{
 		"close_on_disconnect": true,
 		"title":               fmt.Sprintf("nucleagent conv=%d step=%s", req.ConversationID, req.StepID),
-	}
-	if req.Model != "" {
-		params["model"] = req.Model
 	}
 
 	result, err := client.Call(ctx, "session.create", params)
