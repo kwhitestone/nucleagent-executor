@@ -71,6 +71,7 @@ const (
 	evtToolStart       = "tool.start"
 	evtToolComplete    = "tool.complete"
 	evtError           = "error"
+	evtSubagentStart   = "subagent.start"
 )
 
 // GatewayClient Hermes WebSocket JSON-RPC 客户端。

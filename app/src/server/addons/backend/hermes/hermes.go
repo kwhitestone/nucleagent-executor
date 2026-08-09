@@ -263,6 +263,8 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 			// 子代理（subagent/delegate）的事件用 child session id 推送，
 			// 和主 sessionID 不同——不能过滤掉，否则看不到子代理的并行进度。
 			// gateway 是单连接的（每个 Dial 一个独立 WS），不会多路复用。
+			// 调试：打印所有事件类型
+			global.PRISM_LOG.Debug("hermes event", zap.String("type", evt.EventType), zap.Int("payloadLen", len(evt.Payload)))
 			switch evt.EventType {
 			case evtMessageDelta:
 				if t := extractText(evt.Payload); t != "" {
@@ -283,6 +285,23 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 				dur := extractToolDuration(evt.Payload)
 				global.PRISM_LOG.Info("hermes tool.complete", zap.String("tool", tn), zap.String("dur", dur))
 				reporter.ToolUse(tn, "✓ "+dur)
+			case evtSubagentStart:
+				// 子代理启动——它的 session 没在 gateway 的 _sessions 里（没有 watch window）。
+				// 调 session.resume(child_session_id) 让 gateway 创建一个 live entry，
+				// 这样 _mirror_subagent_to_child 就能把子代理的 subagent.text 推到 WS。
+				var p struct {
+					ChildSessionID string `json:"child_session_id"`
+				}
+				_ = json.Unmarshal(evt.Payload, &p)
+				if p.ChildSessionID != "" {
+					global.PRISM_LOG.Info("hermes subagent.start, resuming child session",
+						zap.String("child_sid", p.ChildSessionID))
+					go func(csid string) {
+						_, _ = client.Call(ctx, "session.resume", map[string]any{
+							"session_id": csid,
+						})
+					}(p.ChildSessionID)
+				}
 			case evtMessageComplete:
 				// complete 带完整 text，优先于增量累积。
 				var p struct {
