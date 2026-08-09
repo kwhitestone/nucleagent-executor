@@ -30,17 +30,18 @@ import (
 // Capability Hermes 后端能力标识（与 config.yaml 的 nucleagent.backend 匹配）。
 const Capability = "hermes"
 
-// Config 由 main 在启动期经 Configure 注入（与 runtime.SetSender 同构）。
+// Config 由 main 在启动期经 Configure 注入。
 type Config struct {
-	Bin      string // hermes 可执行文件
-	Workdir  string // HERMES_HOME
-	Host     string // hermes serve 监听 host
-	CoreURL  string // core API 地址
-	Model    string // LLM 模型名
-	FetchKey func() (key, baseURL string, err error) // 每次 Run 前调，取最新服务级 LLM key
+	Bin      string   // hermes 可执行文件
+	Workdir  string   // HERMES_HOME
+	Host     string   // hermes serve 监听 host
+	CoreURL  string   // core API 地址
+	Model    string   // LLM 模型名
+	Sidecar  *Sidecar // hermes→core LLM Proxy 的本地反代（常驻，按 Run 注入 key）
+	FetchKey func() (string, error) // 向 core 换 TempLLMKey（每次 Run 调）
 }
 
-// conf 包级配置，由 Configure 注入。HermesBackend 的方法都读它。
+// conf 包级配置，由 Configure 注入。
 var conf Config
 
 // Configure 注入 Hermes 配置。由 main 在 runExecutor 里、NewRunner 之前调用。
@@ -73,29 +74,36 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 		return a2a.ExecutionResult{StepID: req.StepID, Status: "failed", Error: msg}
 	}
 
-	// 1. 每次 Run 取最新服务级 key，写 managed config，重启 hermes（读新 config）。
-	//    hermes 常驻进程缓存 provider，无法 reload config——只能重启让它读新 key。
-	//    服务级 key 走 GetOrIssueForSession（Redis 持久化 + RefreshTTL），稳定复用。
-	apiKey, baseURL, keyErr := "", "", error(nil)
+	// 1. 向 core 换本次对话的 TempLLMKey，设进 sidecar（转发时注入）。
+	//    hermes 常驻进程只看到 sidecar 的固定地址 + 固定 token，不感知 key 轮换。
+	key, keyErr := "", error(nil)
 	if conf.FetchKey != nil {
-		apiKey, baseURL, keyErr = conf.FetchKey()
+		key, keyErr = conf.FetchKey()
 	}
-	if keyErr != nil || apiKey == "" {
+	if keyErr != nil || key == "" {
 		return fail(fmt.Sprintf("fetch llm key: %v", keyErr))
 	}
-	if err := WriteManagedConfig(conf.Model, apiKey, baseURL); err != nil {
-		return fail(fmt.Sprintf("write managed config: %v", err))
+	if conf.Sidecar != nil {
+		conf.Sidecar.SetActive(key)
 	}
-	proc, err := sup.startFresh()
+
+	// 2. 确保 hermes 常驻进程就绪（懒启动，单例；不重启）。
+	proc, err := sup.ensureStarted()
 	if err != nil {
 		return fail(fmt.Sprintf("hermes not ready: %v", err))
 	}
 
-	// 2. 连 gateway WS。
+	// 3. 连 gateway WS。
 	client, err := Dial(ctx, proc.WSURL())
 	if err != nil {
 		return fail(err.Error())
 	}
+	defer client.Close()
+	defer func() {
+		if conf.Sidecar != nil {
+			conf.Sidecar.ClearActive()
+		}
+	}()
 	defer client.Close()
 
 	// 3. session.create。

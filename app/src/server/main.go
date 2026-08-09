@@ -6,7 +6,6 @@ import (
 	"net/url"
 	stdruntime "runtime"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -104,28 +103,41 @@ func runExecutor(ctx context.Context, cfg *config.Config) {
 	wsURL = rewriteWSHost(wsURL, cfg.CoreURL)
 	global.PRISM_LOG.Info("registered to core", zap.String("wsUrl", wsURL), zap.String("coreUrl", cfg.CoreURL))
 
-	// Hermes 后端配置：FetchKey 回调在每次 Run 时取最新服务级 LLM key
-	//（GetOrIssueForSession 复用 + Redis 持久化），写 managed config + 重启 hermes。
+	// Hermes 后端配置：
+	// 1. 启动 sidecar（hermes→core LLM Proxy 的本地反代，按 Run 注入 key）
+	// 2. managed config 写 sidecar 地址 + 固定 token，hermes 常驻复用
+	// 3. FetchKey 每次 Run 调，取对话级 TempLLMKey 设进 sidecar
 	providerID := cfg.HermesProviderID
 	modelName := cfg.HermesModel
-	proxyBase := strings.TrimRight(cfg.CoreURL, "/") + "/api/llm-proxy/v1"
+	sc, err := hermes.NewSidecar(cfg.CoreURL)
+	if err != nil {
+		global.PRISM_LOG.Error("start hermes sidecar failed", zap.Error(err))
+	}
+	// 先 Configure（注入 conf.Workdir），再写 managed config（它读 conf.Workdir）。
 	hermes.Configure(hermes.Config{
 		Bin:     cfg.HermesBin,
 		Workdir: cfg.HermesWorkdir,
 		Host:    cfg.HermesHost,
 		CoreURL: cfg.CoreURL,
 		Model:   modelName,
-		FetchKey: func() (string, string, error) {
+		Sidecar: sc,
+		FetchKey: func() (string, error) {
 			if providerID == 0 || modelName == "" {
-				return "", "", fmt.Errorf("hermes provider-id/model not configured")
+				return "", fmt.Errorf("hermes provider-id/model not configured")
 			}
 			k, err := ec.FetchLLMKey(context.Background(), providerID, modelName)
 			if err != nil {
-				return "", "", err
+				return "", err
 			}
-			return k.Data.Key, proxyBase, nil
+			return k.Data.Key, nil
 		},
 	})
+	// managed config 写 sidecar 地址 + 固定 token（hermes 常驻读一次，永不轮换）。
+	if sc != nil {
+		if err := hermes.WriteManagedConfig(modelName, "sidecar-fixed-token", sc.BaseURL()); err != nil {
+			global.PRISM_LOG.Warn("write hermes managed config failed", zap.Error(err))
+		}
+	}
 
 	// 建 WS 客户端，handler = runtime。
 	ws := wsclient.NewClient(wsURL, cfg.ExecutorToken, handshake, rt)
