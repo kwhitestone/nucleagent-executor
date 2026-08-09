@@ -261,12 +261,13 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 			case evtToolStart:
 				tn := extractToolName(evt.Payload)
 				tp := extractToolPreview(evt.Payload)
-				global.PRISM_LOG.Info("hermes tool.start", zap.String("tool", tn), zap.String("preview", tp[:min(60,len(tp))]))
+				global.PRISM_LOG.Info("hermes tool.start", zap.String("tool", tn), zap.String("preview", tp[:min(60,len(tp))]), zap.String("raw_payload", string(evt.Payload)))
 				reporter.ToolUse(tn, tp)
 			case evtToolComplete:
 				tn := extractToolName(evt.Payload)
-				global.PRISM_LOG.Info("hermes tool.complete", zap.String("tool", tn))
-				reporter.ToolUse(tn, "done")
+				dur := extractToolDuration(evt.Payload)
+				global.PRISM_LOG.Info("hermes tool.complete", zap.String("tool", tn), zap.String("dur", dur))
+				reporter.ToolUse(tn, "✓ "+dur)
 			case evtMessageComplete:
 				// 终态：complete 带完整 text，优先于增量累积。
 				// hermes 的 complete payload 是 {text, usage, status}；失败时诊断
@@ -306,6 +307,17 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 	}
 }
 
+// extractToolDuration 从 tool.complete 的 payload 取耗时（秒）。
+func extractToolDuration(payload json.RawMessage) string {
+	var p struct {
+		DurationS float64 `json:"duration_s"`
+	}
+	if json.Unmarshal(payload, &p) == nil && p.DurationS > 0 {
+		return fmt.Sprintf("%.1fs", p.DurationS)
+	}
+	return "done"
+}
+
 // extractToolName 从 tool.start/complete 的 payload 取工具名。
 func extractToolName(payload json.RawMessage) string {
 	var p struct {
@@ -319,17 +331,31 @@ func extractToolName(payload json.RawMessage) string {
 	return p.Tool
 }
 
-// extractToolPreview 从 tool.start 的 payload 取预览文本。
+// extractToolPreview 从 tool 事件的 payload 取有意义的描述。
+// hermes tool.start: {"name":"terminal","context":"echo $((1+1))"} → context 是命令
+// hermes tool.complete: {"name":"search_files","args":{"path":"/opt"},"result":"..."} → args 是参数
 func extractToolPreview(payload json.RawMessage) string {
-	var p struct {
-		Preview string `json:"preview"`
-		Args    string `json:"args"`
+	// 先试 context（tool.start 的命令/描述）
+	var ctx struct {
+		Context string `json:"context"`
 	}
-	_ = json.Unmarshal(payload, &p)
-	if p.Preview != "" {
-		return p.Preview
+	if json.Unmarshal(payload, &ctx) == nil && ctx.Context != "" {
+		return ctx.Context
 	}
-	return p.Args
+	// 再试 args（可能是 string 或 object）
+	var raw struct {
+		Args    json.RawMessage `json:"args"`
+		Preview string          `json:"preview"`
+	}
+	if json.Unmarshal(payload, &raw) == nil {
+		if raw.Preview != "" {
+			return raw.Preview
+		}
+		if len(raw.Args) > 0 && string(raw.Args) != "\"\"" {
+			return strings.TrimSpace(string(raw.Args))
+		}
+	}
+	return ""
 }
 
 // writeManagedConfig 把 core LLM Proxy 凭据写进 hermes 的 managed 层 config.yaml。
