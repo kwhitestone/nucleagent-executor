@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nucleagent/nucleagent-shared/a2a"
 	"go.uber.org/zap"
@@ -109,7 +110,6 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 			conf.Sidecar.ClearActive()
 		}
 	}()
-	defer client.Close()
 
 	// 3. session.resume（增量）或 create + 全量历史注入（容器重建后恢复）。
 	sessionID, err := resumeOrCreateSession(ctx, client, req)
@@ -211,17 +211,25 @@ func resumeOrCreateSession(ctx context.Context, client *GatewayClient, req *a2a.
 }
 
 // drainEvents 读事件流，按类型分发到 reporter，直到 message.complete 或 ctx 取消。
+// 5 分钟无事件（hermes 工具调用卡住）自动超时，避免永远阻塞。
 // 返回 (累积文本, 终态status, 错误消息)。
 func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, reporter a2a.StreamReporter) (string, string, string) {
 	var output strings.Builder
 	status := "completed"
 	errMsg := ""
+	idleTimeout := time.NewTimer(5 * time.Minute)
+	defer idleTimeout.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return output.String(), "killed", "cancelled"
+		case <-idleTimeout.C:
+			// hermes 长时间无事件（工具调用卡住/容器内无 browser 等）。
+			return output.String(), "failed", "hermes idle timeout (5min no events)"
 		case evt, ok := <-client.Events():
+			// 收到事件，重置空闲计时器。
+			idleTimeout.Reset(5 * time.Minute)
 			if !ok {
 				// 事件流关闭（连接断开）且没收到 complete：视为失败。
 				if errMsg == "" {
