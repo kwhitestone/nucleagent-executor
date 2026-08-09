@@ -57,101 +57,54 @@ func (p *HermesProcess) WSURL() string {
 	return fmt.Sprintf("ws://%s:%d/api/ws?token=%s", p.host, p.port, p.sessionToken)
 }
 
-// supervisor 单例守护者。executor 生命周期内启动一次 hermes 进程并常驻复用，
-// 崩溃时指数退避重启。managed config 在 Configure 时写一次（服务级长效 key），
-// 常驻 hermes 读一次缓存，所有对话复用——key 靠 core 侧 RefreshTTL 滑动续期。
+// supervisor 单例守护者。每个 Run 重启 hermes 进程（让它读最新 managed config），
+// 因为 hermes 常驻进程缓存 provider 无法 reload。3s 冷启动换可靠性。
 type supervisor struct {
-	mu         sync.Mutex
-	proc       *HermesProcess
-	started    bool
-	startErr   error
-	lifeCtx    context.Context
-	lifeCancel context.CancelFunc
+	mu   sync.Mutex
+	proc *HermesProcess
 }
 
 var sup = &supervisor{}
 
-// ensureStarted 幂等地启动 hermes 常驻进程（已启动则直接返回）。
-func (s *supervisor) ensureStarted() (*HermesProcess, error) {
+// startFresh 杀旧启新，每次 Run 前调用。
+func (s *supervisor) startFresh() (*HermesProcess, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.started && s.proc != nil {
-		return s.proc, s.startErr
+	if s.proc != nil {
+		s.killProc(s.proc)
+		s.proc = nil
 	}
-	s.lifeCtx, s.lifeCancel = context.WithCancel(context.Background())
-	proc, err := startAndSupervise(s.lifeCtx)
-	s.proc = proc
-	s.startErr = err
-	s.started = true
-	if err != nil {
-		global.PRISM_LOG.Error("hermes supervisor: failed to start hermes serve", zap.Error(err))
-	}
-	return proc, err
-}
-
-// startAndSupervise 启动 hermes serve，等 sentinel 拿端口，健康检查，
-// 起 goroutine 崩溃时指数退避重启。
-func startAndSupervise(ctx context.Context) (*HermesProcess, error) {
 	if err := os.MkdirAll(conf.Workdir, 0o755); err != nil {
 		return nil, fmt.Errorf("hermes supervisor: mkdir workdir: %w", err)
 	}
-	proc, err := launchAndWait(ctx)
+	proc, err := launchAndWait(context.Background())
 	if err != nil {
+		global.PRISM_LOG.Error("hermes supervisor: failed to start hermes serve", zap.Error(err))
 		return nil, err
 	}
-	if err := waitHealthy(ctx, proc.BaseURL(), healthDeadline); err != nil {
+	if err := waitHealthy(context.Background(), proc.BaseURL(), healthDeadline); err != nil {
 		global.PRISM_LOG.Warn("hermes supervisor: health check failed (continuing)", zap.Error(err))
 	}
-	// 崩溃重启循环。
-	go func() {
-		backoff := time.Second
-		cur := proc
-		for {
-			if cur.cmd == nil {
-				return
-			}
-			err := cur.cmd.Wait()
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			global.PRISM_LOG.Warn("hermes serve exited, restarting", zap.Error(err), zap.Duration("backoff", backoff))
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < maxBackoff {
-				backoff *= 2
-			}
-			np, lerr := launchAndWait(ctx)
-			if lerr != nil {
-				global.PRISM_LOG.Error("hermes supervisor: restart failed, retrying", zap.Error(lerr))
-				continue
-			}
-			sup.mu.Lock()
-			sup.proc = np
-			sup.mu.Unlock()
-			cur = np
-			backoff = time.Second
-		}
-	}()
+	s.proc = proc
 	return proc, nil
 }
 
 // stop 在 executor 退出时终止 hermes 子进程。
 func (s *supervisor) stop() {
 	s.mu.Lock()
-	cancel := s.lifeCancel
-	proc := s.proc
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	defer s.mu.Unlock()
+	if s.proc != nil {
+		s.killProc(s.proc)
+		s.proc = nil
 	}
-	if proc != nil && proc.cmd != nil && proc.cmd.Process != nil {
-		_ = proc.cmd.Process.Kill()
+}
+
+func (s *supervisor) killProc(p *HermesProcess) {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return
 	}
+	_ = p.cmd.Process.Kill()
+	_, _ = p.cmd.Process.Wait()
 }
 
 // launchAndWait 单次启动 hermes serve 并阻塞到拿到端口 sentinel。

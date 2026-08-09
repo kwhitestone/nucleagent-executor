@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	stdruntime "runtime"
 	"os/signal"
@@ -103,32 +104,28 @@ func runExecutor(ctx context.Context, cfg *config.Config) {
 	wsURL = rewriteWSHost(wsURL, cfg.CoreURL)
 	global.PRISM_LOG.Info("registered to core", zap.String("wsUrl", wsURL), zap.String("coreUrl", cfg.CoreURL))
 
-	// 向 core 换服务级长效 LLM proxy key，写进 hermes managed config（一次性，常驻复用）。
-	// providerId/model 从 config 读（HermesProviderID / HermesModel，可经环境变量覆盖）。
-	hermesCfg := hermes.Config{
+	// Hermes 后端配置：FetchKey 回调在每次 Run 时取最新服务级 LLM key
+	//（GetOrIssueForSession 复用 + Redis 持久化），写 managed config + 重启 hermes。
+	providerID := cfg.HermesProviderID
+	modelName := cfg.HermesModel
+	proxyBase := strings.TrimRight(cfg.CoreURL, "/") + "/api/llm-proxy/v1"
+	hermes.Configure(hermes.Config{
 		Bin:     cfg.HermesBin,
 		Workdir: cfg.HermesWorkdir,
 		Host:    cfg.HermesHost,
 		CoreURL: cfg.CoreURL,
-	}
-	if cfg.HermesProviderID > 0 && cfg.HermesModel != "" {
-		llmKey, err := ec.FetchLLMKey(ctx, cfg.HermesProviderID, cfg.HermesModel)
-		if err != nil {
-			global.PRISM_LOG.Warn("fetch hermes llm-key failed (backend hermes 将无法调 LLM)", zap.Error(err))
-		} else {
-			hermesCfg.ServiceKey = llmKey.Data.Key
-			// proxyBaseUrl 用 executor 自己的 COREURL 拼（core 返回的常是 localhost，
-			// 容器内 hermes 调不到）。和 wsURL 重写同理。
-			hermesCfg.ProxyBaseURL = strings.TrimRight(cfg.CoreURL, "/") + "/api/llm-proxy/v1"
-			global.PRISM_LOG.Info("fetched hermes service llm-key",
-				zap.String("model", llmKey.Data.Model), zap.Int("expiresIn", llmKey.Data.ExpiresIn))
-		}
-	}
-	// 先 Configure（注入 conf.Workdir 等），再写 managed config（它读 conf.Workdir）。
-	hermes.Configure(hermesCfg)
-	if err := hermes.WriteManagedConfig(cfg.HermesModel, hermesCfg.ServiceKey, hermesCfg.ProxyBaseURL); err != nil {
-		global.PRISM_LOG.Warn("write hermes managed config failed", zap.Error(err))
-	}
+		Model:   modelName,
+		FetchKey: func() (string, string, error) {
+			if providerID == 0 || modelName == "" {
+				return "", "", fmt.Errorf("hermes provider-id/model not configured")
+			}
+			k, err := ec.FetchLLMKey(context.Background(), providerID, modelName)
+			if err != nil {
+				return "", "", err
+			}
+			return k.Data.Key, proxyBase, nil
+		},
+	})
 
 	// 建 WS 客户端，handler = runtime。
 	ws := wsclient.NewClient(wsURL, cfg.ExecutorToken, handshake, rt)

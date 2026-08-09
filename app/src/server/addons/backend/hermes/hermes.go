@@ -32,12 +32,12 @@ const Capability = "hermes"
 
 // Config 由 main 在启动期经 Configure 注入（与 runtime.SetSender 同构）。
 type Config struct {
-	Bin          string // hermes 可执行文件
-	Workdir      string // HERMES_HOME
-	Host         string // hermes serve 监听 host
-	CoreURL      string // core API 地址（启动时换 LLM key 用）
-	ServiceKey   string // core 签发的服务级长效 LLM proxy key（启动时 FetchLLMKey 拿）
-	ProxyBaseURL string // LLM proxy base_url（core 返回，写进 managed config）
+	Bin      string // hermes 可执行文件
+	Workdir  string // HERMES_HOME
+	Host     string // hermes serve 监听 host
+	CoreURL  string // core API 地址
+	Model    string // LLM 模型名
+	FetchKey func() (key, baseURL string, err error) // 每次 Run 前调，取最新服务级 LLM key
 }
 
 // conf 包级配置，由 Configure 注入。HermesBackend 的方法都读它。
@@ -73,8 +73,20 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 		return a2a.ExecutionResult{StepID: req.StepID, Status: "failed", Error: msg}
 	}
 
-	// 1. 确保 hermes 常驻进程就绪（懒启动，单例；managed config 在 Configure 时已写好）。
-	proc, err := sup.ensureStarted()
+	// 1. 每次 Run 取最新服务级 key，写 managed config，重启 hermes（读新 config）。
+	//    hermes 常驻进程缓存 provider，无法 reload config——只能重启让它读新 key。
+	//    服务级 key 走 GetOrIssueForSession（Redis 持久化 + RefreshTTL），稳定复用。
+	apiKey, baseURL, keyErr := "", "", error(nil)
+	if conf.FetchKey != nil {
+		apiKey, baseURL, keyErr = conf.FetchKey()
+	}
+	if keyErr != nil || apiKey == "" {
+		return fail(fmt.Sprintf("fetch llm key: %v", keyErr))
+	}
+	if err := WriteManagedConfig(conf.Model, apiKey, baseURL); err != nil {
+		return fail(fmt.Sprintf("write managed config: %v", err))
+	}
+	proc, err := sup.startFresh()
 	if err != nil {
 		return fail(fmt.Sprintf("hermes not ready: %v", err))
 	}
