@@ -93,13 +93,15 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 		conf.Sidecar.SetActive(key)
 	}
 
-	// 2. 确保 hermes 常驻进程就绪（懒启动，单例；不重启）。
+	// 2. 确保 hermes 常驻进程就绪。
+	global.PRISM_LOG.Info("hermes Run: ensureStarted", zap.Uint("conv", req.ConversationID))
 	proc, err := sup.ensureStarted()
 	if err != nil {
 		return fail(fmt.Sprintf("hermes not ready: %v", err))
 	}
 
 	// 3. 连 gateway WS。
+	global.PRISM_LOG.Info("hermes Run: dial WS", zap.String("wsUrl", proc.WSURL()))
 	client, err := Dial(ctx, proc.WSURL())
 	if err != nil {
 		return fail(err.Error())
@@ -111,19 +113,23 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 		}
 	}()
 
-	// 3. session.resume（增量）或 create + 全量历史注入（容器重建后恢复）。
+	// 4. session.resume（增量）或 create + 全量历史注入。
+	global.PRISM_LOG.Info("hermes Run: resumeOrCreateSession", zap.Uint("conv", req.ConversationID))
 	sessionID, err := resumeOrCreateSession(ctx, client, req)
 	if err != nil {
 		return fail(err.Error())
 	}
+	global.PRISM_LOG.Info("hermes Run: session ready", zap.String("sid", sessionID))
 
-	// 4. prompt.submit（异步；输出走事件流）。
+	// 5. prompt.submit。
+	global.PRISM_LOG.Info("hermes Run: prompt.submit", zap.String("sid", sessionID), zap.Int("inputLen", len(req.Input)))
 	if _, err := client.Call(ctx, "prompt.submit", map[string]any{
 		"session_id": sessionID,
 		"text":       req.Input,
 	}); err != nil {
 		return fail(fmt.Sprintf("prompt.submit: %v", err))
 	}
+	global.PRISM_LOG.Info("hermes Run: prompt.submit acked, draining events")
 
 	// 6. 读事件流直到完成/取消。
 	output, status, errMsg := drainEvents(ctx, client, sessionID, reporter)
@@ -253,9 +259,14 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 					reporter.ThinkingDelta(t)
 				}
 			case evtToolStart:
-				reporter.ToolUse(extractToolName(evt.Payload), extractToolPreview(evt.Payload))
+				tn := extractToolName(evt.Payload)
+				tp := extractToolPreview(evt.Payload)
+				global.PRISM_LOG.Info("hermes tool.start", zap.String("tool", tn), zap.String("preview", tp[:min(60,len(tp))]))
+				reporter.ToolUse(tn, tp)
 			case evtToolComplete:
-				reporter.ToolUse(extractToolName(evt.Payload), "done")
+				tn := extractToolName(evt.Payload)
+				global.PRISM_LOG.Info("hermes tool.complete", zap.String("tool", tn))
+				reporter.ToolUse(tn, "done")
 			case evtMessageComplete:
 				// 终态：complete 带完整 text，优先于增量累积。
 				// hermes 的 complete payload 是 {text, usage, status}；失败时诊断
