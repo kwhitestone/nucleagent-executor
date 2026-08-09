@@ -181,6 +181,25 @@ func (c *GatewayClient) Call(ctx context.Context, method string, params interfac
 	}
 }
 
+// Send 发送 JSON-RPC 请求但不等待响应（fire-and-forget）。供 prompt.submit 用：
+// hermes 的 prompt.submit ack 可能和首批事件同时到达，阻塞等 ack 会延迟事件处理。
+func (c *GatewayClient) Send(method string, params interface{}) error {
+	c.idMu.Lock()
+	c.nextID++
+	id := c.nextID
+	c.idMu.Unlock()
+
+	req := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	err = c.conn.WriteMessage(websocket.TextMessage, data)
+	c.writeMu.Unlock()
+	return err
+}
+
 // Events 返回事件流通道。读循环把所有 method=="event" 的通知送入此处。
 func (c *GatewayClient) Events() <-chan GatewayEvent { return c.eventCh }
 

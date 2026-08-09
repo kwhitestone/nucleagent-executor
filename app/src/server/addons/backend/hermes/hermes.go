@@ -121,18 +121,20 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 	}
 	global.PRISM_LOG.Info("hermes Run: session ready", zap.String("sid", sessionID))
 
-	// 5. prompt.submit。
-	global.PRISM_LOG.Info("hermes Run: prompt.submit", zap.String("sid", sessionID), zap.Int("inputLen", len(req.Input)))
-	if _, err := client.Call(ctx, "prompt.submit", map[string]any{
+	// 5. 立即发思考提示（在 prompt.submit 之前，用户发消息后马上看到反馈）。
+	reporter.ThinkingDelta("正在处理…")
+
+	// 6. prompt.submit（fire-and-forget：不等 ack，立即开始读事件流）。
+	//    hermes 的 prompt.submit ack 可能和首批事件同时到达，阻塞等 ack 会
+	//    延迟事件处理（用户看到"卡住"）。用 Send 发送后立即 drainEvents。
+	global.PRISM_LOG.Info("hermes Run: prompt.submit (fire-and-forget)", zap.String("sid", sessionID), zap.Int("inputLen", len(req.Input)))
+	if err := client.Send("prompt.submit", map[string]any{
 		"session_id": sessionID,
 		"text":       req.Input,
 	}); err != nil {
 		return fail(fmt.Sprintf("prompt.submit: %v", err))
 	}
-	global.PRISM_LOG.Info("hermes Run: prompt.submit acked, draining events")
-
-	// 6. 立即发一个思考提示，让用户看到即时反馈（不等第一条 thinking_delta）。
-	reporter.ThinkingDelta("正在处理…")
+	global.PRISM_LOG.Info("hermes Run: prompt.submit sent, draining events")
 
 	// 7. 读事件流直到完成/取消。
 	output, status, errMsg := drainEvents(ctx, client, sessionID, reporter)
