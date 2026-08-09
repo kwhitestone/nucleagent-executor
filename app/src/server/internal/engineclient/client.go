@@ -150,3 +150,46 @@ func truncate(s string, max int) string {
 	}
 	return s[:max] + "..."
 }
+
+// LLMKeyResponse core 的 llm-key 端点响应。
+type LLMKeyResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Key          string `json:"key"`
+		ProxyBaseURL string `json:"proxyBaseUrl"`
+		Model        string `json:"model"`
+		ExpiresIn    int    `json:"expiresIn"`
+	} `json:"data"`
+}
+
+// FetchLLMKey 向 core 换取服务级长效 LLM proxy key（executor 启动时调一次，
+// hermes 常驻缓存用）。providerID/model 决定 key 解析到哪个 provider。
+func (c *Client) FetchLLMKey(ctx context.Context, providerID uint, model string) (*LLMKeyResponse, error) {
+	body, _ := json.Marshal(map[string]any{"providerId": providerID, "model": model})
+	url := c.coreURL + "/api/v1/addons/s2s/executor/llm-key"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Executor-Token", c.executorToken)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("llm-key request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("llm-key http %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var out LLMKeyResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("llm-key unmarshal: %w", err)
+	}
+	if out.Code != 0 || out.Data.Key == "" {
+		return nil, fmt.Errorf("llm-key rejected: code=%d msg=%s", out.Code, out.Message)
+	}
+	return &out, nil
+}

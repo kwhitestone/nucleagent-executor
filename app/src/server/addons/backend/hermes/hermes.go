@@ -20,7 +20,6 @@ import (
 	"strings"
 
 	"github.com/nucleagent/nucleagent-shared/a2a"
-	"github.com/nucleagent/nucleagent-shared/llm"
 	"go.uber.org/zap"
 
 	"whitestone.top/prism-fusion/global"
@@ -33,10 +32,12 @@ const Capability = "hermes"
 
 // Config 由 main 在启动期经 Configure 注入（与 runtime.SetSender 同构）。
 type Config struct {
-	Bin     string // hermes 可执行文件
-	Workdir string // HERMES_HOME
-	Host    string // hermes serve 监听 host
-	CoreURL string // core API 地址（拼 LLM Proxy base_url）
+	Bin          string // hermes 可执行文件
+	Workdir      string // HERMES_HOME
+	Host         string // hermes serve 监听 host
+	CoreURL      string // core API 地址（启动时换 LLM key 用）
+	ServiceKey   string // core 签发的服务级长效 LLM proxy key（启动时 FetchLLMKey 拿）
+	ProxyBaseURL string // LLM proxy base_url（core 返回，写进 managed config）
 }
 
 // conf 包级配置，由 Configure 注入。HermesBackend 的方法都读它。
@@ -72,32 +73,26 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 		return a2a.ExecutionResult{StepID: req.StepID, Status: "failed", Error: msg}
 	}
 
-	// 1. 先写 managed 配置（LLM 凭据每次 Run 都写——临时 key 会轮换）。
-	if err := writeManagedConfig(req); err != nil {
-		return fail(fmt.Sprintf("write managed config: %v", err))
-	}
-
-	// 2. 重启 hermes 进程（杀旧启新），让它读取刚写好的 managed config。
-	// hermes 在 agent init 缓存 provider+api_key，不重启会复用首个 key。
-	proc, err := sup.startFresh()
+	// 1. 确保 hermes 常驻进程就绪（懒启动，单例；managed config 在 Configure 时已写好）。
+	proc, err := sup.ensureStarted()
 	if err != nil {
 		return fail(fmt.Sprintf("hermes not ready: %v", err))
 	}
 
-	// 3. 连 gateway WS。
+	// 2. 连 gateway WS。
 	client, err := Dial(ctx, proc.WSURL())
 	if err != nil {
 		return fail(err.Error())
 	}
 	defer client.Close()
 
-	// 4. session.create。
+	// 3. session.create。
 	sessionID, err := createSession(ctx, client, req)
 	if err != nil {
 		return fail(err.Error())
 	}
 
-	// 5. prompt.submit（异步；输出走事件流）。
+	// 4. prompt.submit（异步；输出走事件流）。
 	if _, err := client.Call(ctx, "prompt.submit", map[string]any{
 		"session_id": sessionID,
 		"text":       req.Input,
@@ -255,20 +250,18 @@ func extractToolPreview(payload json.RawMessage) string {
 
 // writeManagedConfig 把 core LLM Proxy 凭据写进 hermes 的 managed 层 config.yaml。
 //
+// 启动时调一次（Configure 路径），用 core 签发的服务级长效 key。hermes 常驻进程
+// 读一次缓存，所有对话复用——key 靠 core 侧 RefreshTTL 滑动续期永不过期。
+//
 // hermes 的 managed 层（$HERMES_MANAGED_DIR/config.yaml）覆盖 user 配置，且
-// provider:custom 时会读 model.api_key（registry provider 会忽略 api_key 强制
-// 走环境变量）。见 agentia-executor-hermes/shell/src/hermes/managed.rs:48-65。
-func writeManagedConfig(req *a2a.ExecutionRequest) error {
-	apiKey := req.Headers[llm.KeyHeader]
+// provider:custom 时会读 model.api_key。见 agentia-executor-hermes/shell/src/hermes/managed.rs。
+func WriteManagedConfig(model, apiKey, baseURL string) error {
 	if apiKey == "" {
-		return fmt.Errorf("missing %s header", llm.KeyHeader)
+		return fmt.Errorf("writeManagedConfig: empty api key")
 	}
-	model := req.Model
 	if model == "" {
-		model = "gpt-4o" // 兜底；正常应由 core 下发 req.Model
+		model = "gpt-4o"
 	}
-	baseURL := strings.TrimRight(conf.CoreURL, "/") + "/api/llm-proxy/v1"
-
 	managedDir := filepath.Join(conf.Workdir, "managed")
 	if err := os.MkdirAll(managedDir, 0o755); err != nil {
 		return err
@@ -279,7 +272,7 @@ func writeManagedConfig(req *a2a.ExecutionRequest) error {
 	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
 		return err
 	}
-	global.PRISM_LOG.Debug("hermes managed config written",
+	global.PRISM_LOG.Info("hermes managed config written",
 		zap.String("model", model), zap.String("base_url", baseURL), zap.String("path", target))
 	return nil
 }

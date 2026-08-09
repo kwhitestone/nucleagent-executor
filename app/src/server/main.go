@@ -5,6 +5,7 @@ import (
 	"net/url"
 	stdruntime "runtime"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -72,15 +73,6 @@ func runExecutor(ctx context.Context, cfg *config.Config) {
 		}
 	}
 
-	// 注入 Hermes 后端配置（hermes.go 的包级 conf，供 supervisor 写 env、
-	// managed config 拼 base_url）。在 NewRunner 之前完成，确保 Run 时就绪。
-	hermes.Configure(hermes.Config{
-		Bin:     cfg.HermesBin,
-		Workdir: cfg.HermesWorkdir,
-		Host:    cfg.HermesHost,
-		CoreURL: cfg.CoreURL,
-	})
-
 	// runner + runtime。
 	runner := backend.NewRunner(backend.Default)
 	// runtime 需要 wsclient 作为 sender，但 wsclient 又需要 runtime 作为 handler。
@@ -110,6 +102,33 @@ func runExecutor(ctx context.Context, cfg *config.Config) {
 	// 注册既然成功，说明 cfg.CoreURL 可达——WS 走同一 host 必然可达，故用它重写 host。
 	wsURL = rewriteWSHost(wsURL, cfg.CoreURL)
 	global.PRISM_LOG.Info("registered to core", zap.String("wsUrl", wsURL), zap.String("coreUrl", cfg.CoreURL))
+
+	// 向 core 换服务级长效 LLM proxy key，写进 hermes managed config（一次性，常驻复用）。
+	// providerId/model 从 config 读（HermesProviderID / HermesModel，可经环境变量覆盖）。
+	hermesCfg := hermes.Config{
+		Bin:     cfg.HermesBin,
+		Workdir: cfg.HermesWorkdir,
+		Host:    cfg.HermesHost,
+		CoreURL: cfg.CoreURL,
+	}
+	if cfg.HermesProviderID > 0 && cfg.HermesModel != "" {
+		llmKey, err := ec.FetchLLMKey(ctx, cfg.HermesProviderID, cfg.HermesModel)
+		if err != nil {
+			global.PRISM_LOG.Warn("fetch hermes llm-key failed (backend hermes 将无法调 LLM)", zap.Error(err))
+		} else {
+			hermesCfg.ServiceKey = llmKey.Data.Key
+			// proxyBaseUrl 用 executor 自己的 COREURL 拼（core 返回的常是 localhost，
+			// 容器内 hermes 调不到）。和 wsURL 重写同理。
+			hermesCfg.ProxyBaseURL = strings.TrimRight(cfg.CoreURL, "/") + "/api/llm-proxy/v1"
+			global.PRISM_LOG.Info("fetched hermes service llm-key",
+				zap.String("model", llmKey.Data.Model), zap.Int("expiresIn", llmKey.Data.ExpiresIn))
+		}
+	}
+	// 先 Configure（注入 conf.Workdir 等），再写 managed config（它读 conf.Workdir）。
+	hermes.Configure(hermesCfg)
+	if err := hermes.WriteManagedConfig(cfg.HermesModel, hermesCfg.ServiceKey, hermesCfg.ProxyBaseURL); err != nil {
+		global.PRISM_LOG.Warn("write hermes managed config failed", zap.Error(err))
+	}
 
 	// 建 WS 客户端，handler = runtime。
 	ws := wsclient.NewClient(wsURL, cfg.ExecutorToken, handshake, rt)

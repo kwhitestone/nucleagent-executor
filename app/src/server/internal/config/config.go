@@ -30,9 +30,11 @@ type Config struct {
 	HeartbeatInterval string // 心跳间隔（默认 10s）
 
 	// Hermes 后端配置（backend=hermes 时使用）。
-	HermesBin     string // hermes 可执行文件路径（容器内默认 hermes，裸跑指向 venv）
-	HermesWorkdir string // HERMES_HOME（数据/会话目录）
-	HermesHost    string // hermes serve 监听 host（默认 127.0.0.1）
+	HermesBin        string // hermes 可执行文件路径（容器内默认 hermes，裸跑指向 venv）
+	HermesWorkdir    string // HERMES_HOME（数据/会话目录）
+	HermesHost       string // hermes serve 监听 host（默认 127.0.0.1）
+	HermesProviderID uint   // LLM provider ID（向 core 换服务级 key 用）
+	HermesModel      string // LLM 模型名（如 glm-5.2）
 }
 
 // Load 从 global.PRISM_VP 读取 nucleagent 段并展开环境变量。
@@ -58,6 +60,8 @@ func Load() (*Config, error) {
 		HermesBin:         vp.GetString("nucleagent.hermes.bin"),
 		HermesWorkdir:     vp.GetString("nucleagent.hermes.workdir"),
 		HermesHost:        vp.GetString("nucleagent.hermes.host"),
+		HermesProviderID:  uint(vp.GetInt("nucleagent.hermes.provider-id")),
+		HermesModel:       vp.GetString("nucleagent.hermes.model"),
 	}
 
 	// 展开环境变量（vp.AutomaticEnv 已开，但显式默认值更稳）。

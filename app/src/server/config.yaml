@@ -42,5 +42,7 @@ nucleagent:
     bin: '${HERMES_BIN:-hermes}'        # hermes 可执行文件（容器内 PATH；裸跑指向 venv 的 hermes）
     workdir: '${HERMES_WORKDIR:-./data/hermes}'  # HERMES_HOME（数据/会话目录）
     host: '127.0.0.1'                   # hermes serve 监听 host
+    provider-id: 2                      # core DB 里的 LLM provider ID（向 core 换服务级 key 用）
+    model: 'glm-5.2'                    # LLM 模型名
   session:
     file: './task_sessions.json'        # TaskSession JSON 持久化文件（session addon 用）
