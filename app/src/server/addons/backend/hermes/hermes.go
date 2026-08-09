@@ -230,17 +230,28 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 	errMsg := ""
 	idleTimeout := time.NewTimer(5 * time.Minute)
 	defer idleTimeout.Stop()
+	// message.complete 后进入"等待汇总轮"模式：idle 缩短到 30s。
+	// 如果 30s 内没有新事件（子代理汇总轮），才认为真正结束。
+	completeReceived := false
 
 	for {
 		select {
 		case <-ctx.Done():
 			return output.String(), "killed", "cancelled"
 		case <-idleTimeout.C:
-			// hermes 长时间无事件（工具调用卡住/容器内无 browser 等）。
+			if completeReceived {
+				// message.complete 后 30s 无新事件 → 真正结束。
+				return output.String(), status, errMsg
+			}
+			// 正常阶段 5min 无事件（工具调用卡住等）。
 			return output.String(), "failed", "hermes idle timeout (5min no events)"
 		case evt, ok := <-client.Events():
-			// 收到事件，重置空闲计时器。
-			idleTimeout.Reset(5 * time.Minute)
+			// 收到事件，重置空闲计时器（complete 后用 30s，否则 5min）。
+			if completeReceived {
+				idleTimeout.Reset(30 * time.Second)
+			} else {
+				idleTimeout.Reset(5 * time.Minute)
+			}
 			if !ok {
 				// 事件流关闭（连接断开）且没收到 complete：视为失败。
 				if errMsg == "" {
@@ -273,9 +284,7 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 				global.PRISM_LOG.Info("hermes tool.complete", zap.String("tool", tn), zap.String("dur", dur))
 				reporter.ToolUse(tn, "✓ "+dur)
 			case evtMessageComplete:
-				// 终态：complete 带完整 text，优先于增量累积。
-				// hermes 的 complete payload 是 {text, usage, status}；失败时诊断
-				// 走 text 而非 error 字段（对齐 shell/src/hermes/mod.rs:288-297）。
+				// complete 带完整 text，优先于增量累积。
 				var p struct {
 					Text   string `json:"text"`
 					Status string `json:"status"`
@@ -288,10 +297,17 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 				}
 				if p.Status == "error" || p.Error != "" {
 					status = "error"
-					// 失败但无显式 error：用 text 作诊断，避免空错误信息。
 					errMsg = firstNonEmpty(p.Error, p.Text, "hermes reported message error")
+					return output.String(), status, errMsg
 				}
-				return output.String(), status, errMsg
+				// 不立即返回——hermes 的 delegate_task 是异步的：
+				// 主代理可能先回复"已启动"+ complete，然后等子代理完成后做汇总轮。
+				// 标记 completeReceived=true，idle timer 切到 30s（见循环顶部）。
+				// 如果 30s 内有新事件（子代理汇总轮的 message.start/delta），继续 drain；
+				// 如果 30s 无事件，才认为真正结束。
+				completeReceived = true
+				idleTimeout.Reset(30 * time.Second)
+				global.PRISM_LOG.Info("hermes message.complete, waiting for possible subagent summary (30s idle)")
 			case evtError:
 				var p struct {
 					Message string `json:"message"`
