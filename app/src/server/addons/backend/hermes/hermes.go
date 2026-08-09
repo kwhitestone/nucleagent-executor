@@ -249,10 +249,9 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 				}
 				return output.String(), status, errMsg
 			}
-			// 只处理本 session 的事件（gateway 可能多路复用）。
-			if evt.SessionID != "" && evt.SessionID != sessionID {
-				continue
-			}
+			// 子代理（subagent/delegate）的事件用 child session id 推送，
+			// 和主 sessionID 不同——不能过滤掉，否则看不到子代理的并行进度。
+			// gateway 是单连接的（每个 Dial 一个独立 WS），不会多路复用。
 			switch evt.EventType {
 			case evtMessageDelta:
 				if t := extractText(evt.Payload); t != "" {
