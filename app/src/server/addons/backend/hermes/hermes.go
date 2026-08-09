@@ -131,7 +131,10 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 	}
 	global.PRISM_LOG.Info("hermes Run: prompt.submit acked, draining events")
 
-	// 6. 读事件流直到完成/取消。
+	// 6. 立即发一个思考提示，让用户看到即时反馈（不等第一条 thinking_delta）。
+	reporter.ThinkingDelta("正在处理…")
+
+	// 7. 读事件流直到完成/取消。
 	output, status, errMsg := drainEvents(ctx, client, sessionID, reporter)
 	reporter.Flush()
 
