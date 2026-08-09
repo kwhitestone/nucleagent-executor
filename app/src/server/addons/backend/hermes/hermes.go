@@ -18,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/nucleagent/nucleagent-shared/a2a"
 	"go.uber.org/zap"
@@ -44,10 +43,6 @@ type Config struct {
 
 // conf 包级配置，由 Configure 注入。
 var conf Config
-
-// sessionMap 缓存 ConversationID → hermes stored_session_id，
-// 让同对话的 follow-up 用 session.resume 恢复历史（有记忆）。
-var sessionMap sync.Map // map[uint]string
 
 // Configure 注入 Hermes 配置。由 main 在 runExecutor 里、NewRunner 之前调用。
 func Configure(c Config) { conf = c }
@@ -111,8 +106,8 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 	}()
 	defer client.Close()
 
-	// 3. session.create 或 resume（同对话复用，有记忆）。
-	sessionID, err := getOrCreateSession(ctx, client, req)
+	// 3. session.create + 注入 core 历史消息（hermes 无状态，记忆来自 core）。
+	sessionID, err := createSessionWithHistory(ctx, client, req)
 	if err != nil {
 		return fail(err.Error())
 	}
@@ -142,43 +137,37 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 // （Run 的 drainEvents 会感知 ctx.Done 返回 killed）；这里无需额外动作。
 func (b *HermesBackend) Kill(ctx context.Context, session a2a.TaskSession) error { return nil }
 
-// getOrCreateSession 按 ConversationID 复用 hermes session（有记忆）。
+// createSessionWithHistory 每次新建 hermes session，把 core 的对话历史注入。
 //
-// 首次：session.create（close_on_disconnect=false），缓存 stored_session_id。
-// 后续：session.resume（从 DB 恢复历史），让 follow-up 有上下文。
-func getOrCreateSession(ctx context.Context, client *GatewayClient, req *a2a.ExecutionRequest) (string, error) {
-	// 有缓存的 stored_session_id → 尝试 resume。
-	if stored, ok := sessionMap.Load(req.ConversationID); ok {
-		storedID := stored.(string)
-		result, err := client.Call(ctx, "session.resume", map[string]any{
-			"session_id": storedID,
-		})
-		if err == nil {
-			// resume 成功，从 result 拿新的内存 session_id（prompt.submit 需要它）。
-			var resp struct {
-				SessionID string `json:"session_id"`
-			}
-			if json.Unmarshal(result, &resp) == nil && resp.SessionID != "" {
-				return resp.SessionID, nil
-			}
-			return storedID, nil
-		}
-		// resume 失败（session 已过期/清理）→ 重新 create。
-		sessionMap.Delete(req.ConversationID)
-	}
-
-	// 首次或 resume 失败 → session.create。
+// hermes 完全无状态——所有记忆来自 core DB（req.Context），容器随时可重建。
+// session.create 的 messages 参数预填历史，让 hermes 知道之前的对话。
+func createSessionWithHistory(ctx context.Context, client *GatewayClient, req *a2a.ExecutionRequest) (string, error) {
 	params := map[string]any{
-		"close_on_disconnect": false, // WS 断开不关 session，供后续 resume
+		"close_on_disconnect": true,
 		"title":               fmt.Sprintf("nucleagent conv=%d", req.ConversationID),
 	}
+
+	// 从 req.Context 解析历史消息，注入 session.create 的 messages 参数。
+	if len(req.Context) > 0 {
+		var hist []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(req.Context, &hist) == nil && len(hist) > 0 {
+			msgs := make([]map[string]string, 0, len(hist))
+			for _, h := range hist {
+				msgs = append(msgs, map[string]string{"role": h.Role, "content": h.Content})
+			}
+			params["messages"] = msgs
+		}
+	}
+
 	result, err := client.Call(ctx, "session.create", params)
 	if err != nil {
 		return "", fmt.Errorf("session.create: %w", err)
 	}
 	var resp struct {
-		SessionID      string `json:"session_id"`
-		StoredSessionID string `json:"stored_session_id"`
+		SessionID string `json:"session_id"`
 	}
 	if err := json.Unmarshal(result, &resp); err != nil {
 		return "", fmt.Errorf("session.create: parse: %w", err)
@@ -186,12 +175,6 @@ func getOrCreateSession(ctx context.Context, client *GatewayClient, req *a2a.Exe
 	if resp.SessionID == "" {
 		return "", fmt.Errorf("session.create returned no session_id")
 	}
-	// 缓存 stored_session_id 供后续 resume（用内存 sid 也行，但 stored 更稳定）。
-	cacheKey := resp.SessionID
-	if resp.StoredSessionID != "" {
-		cacheKey = resp.StoredSessionID
-	}
-	sessionMap.Store(req.ConversationID, cacheKey)
 	return resp.SessionID, nil
 }
 
