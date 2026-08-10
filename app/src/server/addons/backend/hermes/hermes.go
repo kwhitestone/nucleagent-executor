@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nucleagent/nucleagent-shared/a2a"
+	"github.com/nucleagent/nucleagent-shared/llm"
 	"go.uber.org/zap"
 
 	"whitestone.top/prism-fusion/global"
@@ -53,6 +54,18 @@ var sessionMap sync.Map // map[uint]string
 // Configure 注入 Hermes 配置。由 main 在 runExecutor 里、NewRunner 之前调用。
 func Configure(c Config) { conf = c }
 
+// HeaderSessionReset core 要求丢弃 hermes 侧已缓存 session 的信号头。
+//
+// 走 Headers 而不是新增 ExecutionRequest 字段：这是「本次执行的一个指令」，
+// 不是任务数据；且旧版 executor 收到未知头会自然忽略，无需协议协商。
+const HeaderSessionReset = "x-session-reset"
+
+// sessionResetRequested 判断 core 是否要求重建 session。
+func sessionResetRequested(req *a2a.ExecutionRequest) bool {
+	v := req.Headers[HeaderSessionReset]
+	return v != "" && v != "0" && v != "false"
+}
+
 // HermesBackend Hermes Agent 执行后端。
 type HermesBackend struct{}
 
@@ -80,14 +93,23 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 		return a2a.ExecutionResult{StepID: req.StepID, Status: "failed", Error: msg}
 	}
 
-	// 1. 向 core 换本次对话的 TempLLMKey，设进 sidecar（转发时注入）。
+	// 1. 取本次执行用的 TempLLMKey，设进 sidecar（转发时注入）。
 	//    hermes 常驻进程只看到 sidecar 的固定地址 + 固定 token，不感知 key 轮换。
-	key, keyErr := "", error(nil)
-	if conf.FetchKey != nil {
+	//
+	//    **优先用 core 随请求下发的对话级 key**（req.Headers）：它绑定了本对话选定的
+	//    provider/model，是模型选择能生效的前提；也让 CallLog 能归因到具体对话
+	//    （服务级 key 的 ConversationID 恒为 0，那些日志全部无法归因）。
+	//    取不到才回退服务级长效 key —— core 未下发或旧版 core 的场景仍可用。
+	key := req.Headers[llm.KeyHeader]
+	if key == "" {
+		if conf.FetchKey == nil {
+			return fail("no llm key: core 未下发且未配置服务级 key")
+		}
+		var keyErr error
 		key, keyErr = conf.FetchKey()
-	}
-	if keyErr != nil || key == "" {
-		return fail(fmt.Sprintf("fetch llm key: %v", keyErr))
+		if keyErr != nil || key == "" {
+			return fail(fmt.Sprintf("fetch llm key: %v", keyErr))
+		}
 	}
 	if conf.Sidecar != nil {
 		conf.Sidecar.SetActive(key)
@@ -170,6 +192,16 @@ func (b *HermesBackend) Kill(ctx context.Context, session a2a.TaskSession) error
 // 容器重建后（state.db 丢失）：resume 失败 → fallback 到 session.create + 把
 // core DB 的历史全量注入 messages 参数，从 core 完整恢复。
 func resumeOrCreateSession(ctx context.Context, client *GatewayClient, req *a2a.ExecutionRequest) (string, error) {
+	// 模型/provider 变更时 core 会要求重建 session：hermes 的模型是建 session 时
+	// 定的，resume 只会继续用旧模型，用户改了模型却毫无变化。
+	// 丢掉缓存强制走下面的 create 分支；历史随 req.Context 全量重注，不丢上下文。
+	if sessionResetRequested(req) {
+		if _, had := sessionMap.LoadAndDelete(req.ConversationID); had {
+			global.PRISM_LOG.Info("hermes: 按 core 要求重建 session（模型变更）",
+				zap.Uint("conv", req.ConversationID), zap.String("model", req.Model))
+		}
+	}
+
 	// 尝试 resume（正常路径：增量、高效）。
 	if stored, ok := sessionMap.Load(req.ConversationID); ok {
 		storedID := stored.(string)
@@ -194,6 +226,15 @@ func resumeOrCreateSession(ctx context.Context, client *GatewayClient, req *a2a.
 	params := map[string]any{
 		"close_on_disconnect": false, // 保留 session 供下次 resume
 		"title":               fmt.Sprintf("nucleagent conv=%d", req.ConversationID),
+	}
+	// 会话级模型覆盖。hermes 把它作为 PER-SESSION override 处理（不写全局配置），
+	// 所以并发的不同对话可以各用各的模型。
+	//
+	// 只在 create 分支设置：hermes 的模型是建 session 时定的，resume 改不了 ——
+	// 这也是 core 换模型时必须让我们重建 session 的原因（见 sessionResetRequested）。
+	// 留空则由 hermes 用 managed config 里的默认模型兜底。
+	if req.Model != "" {
+		params["model"] = req.Model
 	}
 	// 历史注入。DecodeExecutionContext 兼容两种形态（对象 / 旧的裸数组），
 	// 故 core 与 executor 不必同步部署 —— 详见 a2a.DecodeExecutionContext。

@@ -128,6 +128,30 @@ func TestAttachAllAllFailReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestSessionResetRequested 只有明确为真的值才触发重建 —— 否则一个残留的
+// "x-session-reset: 0" 会让每轮都重建 session，白扔掉 resume 的增量优势。
+func TestSessionResetRequested(t *testing.T) {
+	cases := []struct {
+		headers map[string]string
+		want    bool
+	}{
+		{nil, false},
+		{map[string]string{}, false},
+		{map[string]string{HeaderSessionReset: "1"}, true},
+		{map[string]string{HeaderSessionReset: "true"}, true},
+		{map[string]string{HeaderSessionReset: "0"}, false},
+		{map[string]string{HeaderSessionReset: "false"}, false},
+		{map[string]string{HeaderSessionReset: ""}, false},
+		{map[string]string{"other": "1"}, false},
+	}
+	for _, c := range cases {
+		got := sessionResetRequested(&a2a.ExecutionRequest{Headers: c.headers})
+		if got != c.want {
+			t.Errorf("sessionResetRequested(%v) = %v, want %v", c.headers, got, c.want)
+		}
+	}
+}
+
 // TestHistoryAttachmentsMentionedInMessages 历史附件必须在注入 hermes 的 messages 里
 // 留下文件名痕迹，否则 session 重建后早期附件对模型完全不可见。
 //
