@@ -266,7 +266,8 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 			// 调试：打印所有事件类型
 			global.PRISM_LOG.Debug("hermes event", zap.String("type", evt.EventType), zap.Int("payloadLen", len(evt.Payload)))
 			switch evt.EventType {
-			case evtMessageDelta:
+			case evtMessageDelta, evtSubagentText:
+				// subagent.text 是子代理的流式输出，和 message.delta 一样处理
 				if t := extractText(evt.Payload); t != "" {
 					output.WriteString(t)
 					reporter.TextDelta(t)
