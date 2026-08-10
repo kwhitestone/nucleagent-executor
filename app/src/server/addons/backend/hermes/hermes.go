@@ -124,13 +124,23 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 	// 5. 立即发思考提示（在 prompt.submit 之前，用户发消息后马上看到反馈）。
 	reporter.ThinkingDelta("正在处理…")
 
+	// 5.5 注入本轮附件。**必须在 prompt.submit 之前**：hermes 在 submit 时才把
+	//     session 上累积的附件 drain 进当轮，晚于 submit 则本轮不可见。
+	//     非图片附件会返回 @file: 引用，追加到 prompt 让 agent 知道去读。
+	prompt := req.Input
+	if len(req.Attachments) > 0 {
+		global.PRISM_LOG.Info("hermes Run: attach",
+			zap.String("sid", sessionID), zap.Int("count", len(req.Attachments)))
+		prompt += attachAll(ctx, client, sessionID, req.Attachments, reporter)
+	}
+
 	// 6. prompt.submit（fire-and-forget：不等 ack，立即开始读事件流）。
 	//    hermes 的 prompt.submit ack 可能和首批事件同时到达，阻塞等 ack 会
 	//    延迟事件处理（用户看到"卡住"）。用 Send 发送后立即 drainEvents。
-	global.PRISM_LOG.Info("hermes Run: prompt.submit (fire-and-forget)", zap.String("sid", sessionID), zap.Int("inputLen", len(req.Input)))
+	global.PRISM_LOG.Info("hermes Run: prompt.submit (fire-and-forget)", zap.String("sid", sessionID), zap.Int("inputLen", len(prompt)))
 	if err := client.Send("prompt.submit", map[string]any{
 		"session_id": sessionID,
-		"text":       req.Input,
+		"text":       prompt,
 	}); err != nil {
 		return fail(fmt.Sprintf("prompt.submit: %v", err))
 	}
@@ -185,18 +195,36 @@ func resumeOrCreateSession(ctx context.Context, client *GatewayClient, req *a2a.
 		"close_on_disconnect": false, // 保留 session 供下次 resume
 		"title":               fmt.Sprintf("nucleagent conv=%d", req.ConversationID),
 	}
-	if len(req.Context) > 0 {
-		var hist []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}
-		if json.Unmarshal(req.Context, &hist) == nil && len(hist) > 0 {
-			msgs := make([]map[string]string, 0, len(hist))
-			for _, h := range hist {
-				msgs = append(msgs, map[string]string{"role": h.Role, "content": h.Content})
+	// 历史注入。DecodeExecutionContext 兼容两种形态（对象 / 旧的裸数组），
+	// 故 core 与 executor 不必同步部署 —— 详见 a2a.DecodeExecutionContext。
+	if ec, err := a2a.DecodeExecutionContext(req.Context); err != nil {
+		// 解析失败不阻断：没历史也能跑（等于新会话），比整轮失败好。
+		global.PRISM_LOG.Warn("hermes: 解析对话历史失败，按无历史继续", zap.Error(err))
+	} else if ec != nil && len(ec.History) > 0 {
+		msgs := make([]map[string]string, 0, len(ec.History))
+		for _, h := range ec.History {
+			content := h.Content
+			// 历史附件在这里只按文件名提及，不重新 attach 字节。
+			//
+			// 正常多轮走的是上面的 session.resume 分支 —— hermes 自己保留着
+			// session，第 1 轮 attach 的文件仍在其对话历史里，agent 照样能读。
+			// 只有 resume 失败回退到 create 时（容器重建/session 过期）才走到这，
+			// 此时字节确实不在 hermes 侧了，模型只知道"那轮有这些文件"而读不到内容。
+			//
+			// 没有在这里重新 attach 是刻意的：附件是挂到 session 上、由下一次
+			// prompt.submit drain 进**当轮**的，把历史图片重新 attach 会让它们
+			// 混进当前这一轮的视觉上下文，语义错乱。要彻底修得让 file 类附件走
+			// 工作区暂存（file.attach 是持久化的，不参与 drain），属独立改进。
+			if len(h.Attachments) > 0 {
+				names := make([]string, 0, len(h.Attachments))
+				for _, a := range h.Attachments {
+					names = append(names, attachmentName(a))
+				}
+				content += "\n[附件: " + strings.Join(names, ", ") + "]"
 			}
-			params["messages"] = msgs
+			msgs = append(msgs, map[string]string{"role": h.Role, "content": content})
 		}
+		params["messages"] = msgs
 	}
 	result, err := client.Call(ctx, "session.create", params)
 	if err != nil {
