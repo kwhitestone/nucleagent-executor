@@ -221,6 +221,67 @@ func resumeOrCreateSession(ctx context.Context, client *GatewayClient, req *a2a.
 	return resp.SessionID, nil
 }
 
+// tailDelegationLogs 轮询 <workdir>/cache/delegation/live/deleg_*/task-*.log，
+// 把子代理的 assistant 输出行通过 reporter.TextDelta 推给前端。
+// 不改 hermes 源码——利用 hermes 内置的 delegation live transcript 文件。
+// 格式：每行 "HH:MM:SS role     | text"，role=assistant/final/start/think。
+func tailDelegationLogs(ctx context.Context, reporter a2a.StreamReporter) {
+	globPattern := filepath.Join(conf.Workdir, "cache", "delegation", "live", "deleg_*", "task-*.log")
+	global.PRISM_LOG.Info("hermes tailDelegationLogs started", zap.String("glob", globPattern))
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	offsets := make(map[string]int) // file path → read offset
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			files, _ := filepath.Glob(globPattern)
+			for _, f := range files {
+				data, err := os.ReadFile(f)
+				if err != nil {
+					continue
+				}
+				off := offsets[f]
+				if off >= len(data) {
+					continue
+				}
+				newData := data[off:]
+				offsets[f] = len(data)
+				// 解析新增行，提取 assistant/final 行推给前端
+				for _, line := range strings.Split(string(newData), "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					// 格式 "HH:MM:SS role     | text"
+					// 用 ThinkingDelta（独立 streaming 行，不干扰主代理输出）
+					if strings.Contains(line, " assistant |") || strings.Contains(line, " think    |") {
+						text := extractAfterPipe(line)
+						if text != "" {
+							reporter.ThinkingDelta("[子代理] " + text + "\n")
+						}
+					} else if strings.Contains(line, " final    |") {
+						text := extractAfterPipe(line)
+						if text != "" && strings.Contains(text, "summary:") {
+							reporter.ThinkingDelta("[完成] " + text + "\n")
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// extractAfterPipe 从 "HH:MM:SS role | text" 提取 text 部分。
+func extractAfterPipe(line string) string {
+	idx := strings.Index(line, "| ")
+	if idx < 0 {
+		return ""
+	}
+	return line[idx+2:]
+}
+
 // drainEvents 读事件流，按类型分发到 reporter，直到 message.complete 或 ctx 取消。
 // 5 分钟无事件（hermes 工具调用卡住）自动超时，避免永远阻塞。
 // 返回 (累积文本, 终态status, 错误消息)。
@@ -279,30 +340,22 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 			case evtToolStart:
 				tn := extractToolName(evt.Payload)
 				tp := extractToolPreview(evt.Payload)
-				global.PRISM_LOG.Info("hermes tool.start", zap.String("tool", tn), zap.String("preview", tp[:min(60,len(tp))]), zap.String("raw_payload", string(evt.Payload)))
+				global.PRISM_LOG.Info("hermes tool.start", zap.String("tool", tn))
 				reporter.ToolUse(tn, tp)
+				// delegate_task 启动子代理——hermes 的 daemon 线程写 live transcript 到
+				// <workdir>/cache/delegation/live/deleg_*/task-*.log，但 WS 不推送。
+				// 启动 tail goroutine 读 log 文件，把子代理输出推给前端。
+				if tn == "delegate_task" {
+					tailCtx, tailCancel := context.WithCancel(ctx)
+					go tailDelegationLogs(tailCtx, reporter)
+					// 在 tool.complete 或 drainEvents 结束时 cancel
+					defer tailCancel()
+				}
 			case evtToolComplete:
 				tn := extractToolName(evt.Payload)
 				dur := extractToolDuration(evt.Payload)
 				global.PRISM_LOG.Info("hermes tool.complete", zap.String("tool", tn), zap.String("dur", dur))
 				reporter.ToolUse(tn, "✓ "+dur)
-			case evtSubagentStart:
-				// 子代理启动——它的 session 没在 gateway 的 _sessions 里（没有 watch window）。
-				// 调 session.resume(child_session_id) 让 gateway 创建一个 live entry，
-				// 这样 _mirror_subagent_to_child 就能把子代理的 subagent.text 推到 WS。
-				var p struct {
-					ChildSessionID string `json:"child_session_id"`
-				}
-				_ = json.Unmarshal(evt.Payload, &p)
-				if p.ChildSessionID != "" {
-					global.PRISM_LOG.Info("hermes subagent.start, resuming child session",
-						zap.String("child_sid", p.ChildSessionID))
-					go func(csid string) {
-						_, _ = client.Call(ctx, "session.resume", map[string]any{
-							"session_id": csid,
-						})
-					}(p.ChildSessionID)
-				}
 			case evtMessageComplete:
 				// complete 带完整 text，优先于增量累积。
 				var p struct {
