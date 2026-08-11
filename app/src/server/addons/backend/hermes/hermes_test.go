@@ -1,9 +1,109 @@
 package hermes
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 )
+
+// fakeEventSource 内存实现 eventSource，按顺序投递预设事件。
+type fakeEventSource struct {
+	events chan GatewayEvent
+	done   chan struct{}
+}
+
+func newFakeEventSource(evts ...GatewayEvent) *fakeEventSource {
+	ch := make(chan GatewayEvent, len(evts))
+	for _, e := range evts {
+		ch <- e
+	}
+	// 投完不 close events —— close done 模拟连接断开（仅在测试想触发那条路径时）。
+	return &fakeEventSource{events: ch, done: make(chan struct{})}
+}
+
+func (f *fakeEventSource) Events() <-chan GatewayEvent { return f.events }
+func (f *fakeEventSource) Done() <-chan struct{}       { return f.done }
+
+// noopReporter 满足 a2a.StreamReporter，忽略所有回调。
+type noopReporter struct{}
+
+func (noopReporter) TextDelta(string)       {}
+func (noopReporter) ThinkingDelta(string)   {}
+func (noopReporter) Progress(string)        {}
+func (noopReporter) ToolUse(string, string) {}
+func (noopReporter) Flush()                 {}
+
+// TestDrainEventsReturnsOnComplete 收到 message.complete 必须立即返回，
+// 不能再等任何时间窗口。这是本测试的核心目的：守住「complete 即返回」这条边界，
+// 防止有人重新加回 complete 后的等待逻辑（之前的 30s 空等曾把「答完即追问」误判成 409）。
+//
+// 判据不是「最终返回了」而是「用了多久」—— 超过 2s 即判定又加回了等待逻辑。
+func TestDrainEventsReturnsOnComplete(t *testing.T) {
+	src := newFakeEventSource(
+		GatewayEvent{EventType: "message.delta", Payload: json.RawMessage(`{"text":"hi"}`)},
+		GatewayEvent{EventType: "message.complete", Payload: json.RawMessage(`{"text":"hi"}`)},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	out, status, errMsg := drainEvents(ctx, src, "s1", noopReporter{})
+	elapsed := time.Since(start)
+
+	if status != "completed" {
+		t.Errorf("status = %q, want completed", status)
+	}
+	if errMsg != "" {
+		t.Errorf("errMsg = %q, want empty", errMsg)
+	}
+	if out != "hi" {
+		t.Errorf("output = %q, want hi", out)
+	}
+	// complete 一到就该返回。给 2s 余量（通道调度），超过说明又加了等待窗口。
+	if elapsed > 2*time.Second {
+		t.Errorf("drainEvents 用了 %v 才返回，应在收到 complete 后立即返回（≤2s）", elapsed)
+	}
+}
+
+// TestDrainEventsIdleTimeoutStillWorks 无事件时不永久阻塞。
+// 测试用短 ctx 超时注入 —— 不真等 5min，只验证「无事件会超时退出」这条路径，
+// 说明 idle 保护机制（ctx 兜底 / 5min timer）仍在生效。
+func TestDrainEventsIdleTimeoutStillWorks(t *testing.T) {
+	src := newFakeEventSource() // 空：不投任何事件
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, status, errMsg := drainEvents(ctx, src, "s1", noopReporter{})
+
+	// ctx 先于 5min idle 触发 → 走 ctx.Done() 分支，status=killed。
+	if status != "killed" {
+		t.Errorf("status = %q, want killed (ctx cancelled before any event)", status)
+	}
+	if errMsg != "cancelled" {
+		t.Errorf("errMsg = %q, want cancelled", errMsg)
+	}
+}
+
+// TestDrainEventsConnectionClosedBeforeComplete 连接断开且没收到 complete → 失败。
+// 保护「hermes 进程崩了 / 网络断了」的场景，不能静默挂起。
+func TestDrainEventsConnectionClosedBeforeComplete(t *testing.T) {
+	src := newFakeEventSource(
+		GatewayEvent{EventType: "message.delta", Payload: json.RawMessage(`{"text":"partial"}`)},
+	)
+	// 模拟连接断开（Done 关闭）。事件通道还有缓冲的 delta，但不会有 complete。
+	close(src.done)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, status, _ := drainEvents(ctx, src, "s1", noopReporter{})
+
+	if status != "failed" {
+		t.Errorf("status = %q, want failed (connection closed before complete)", status)
+	}
+}
 
 // TestParseReadyPort 验证 hermes serve 端口 sentinel 解析。
 // 对齐 agentia-executor-hermes/shell/src/hermes/process.rs 的测试用例。

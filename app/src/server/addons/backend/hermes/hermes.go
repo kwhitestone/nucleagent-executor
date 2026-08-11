@@ -351,37 +351,55 @@ func extractAfterPipe(line string) string {
 	return line[idx+2:]
 }
 
+// eventSource 抽象 drainEvents 对 gateway 客户端的依赖：只需「读事件」和「连接是否关闭」
+// 两个能力。抽出来是为了能单测 drainEvents（见 hermes_test.go 的 TestDrainEventsReturnsOnComplete）。
+// *GatewayClient 满足它。
+type eventSource interface {
+	Events() <-chan GatewayEvent
+	Done() <-chan struct{}
+}
+
 // drainEvents 读事件流，按类型分发到 reporter，直到 message.complete 或 ctx 取消。
-// 5 分钟无事件（hermes 工具调用卡住）自动超时，避免永远阻塞。
-// 返回 (累积文本, 终态status, 错误消息)。
-func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, reporter a2a.StreamReporter) (string, string, string) {
+//
+// 终态判定原则：收到 message.complete 即返回 —— hermes 说这轮生成结束了，那这轮
+// 就结束。此前这里曾无条件在 complete 后再等 30s「等子代理汇总轮」，但查 hermes
+// 源码后确认这是错的：
+//   - 无 delegate_task：纯白等，徒增 30s 窗口（用户答完就追问会被 core 的
+//     executing 守卫拒成 409）。
+//   - delegate_task 默认（同步，delegate_tool.py:2823 的 background 默认 false）：
+//     _execute_and_aggregate 会 join 所有子代理，聚合结果作为 tool result 返回给
+//     主代理，主代理再生成最终回答。整轮只有一个 message.complete，且它在子代理
+//     全部完成之后。complete 后等不到任何东西。
+//   - delegate_task 异步（background=true）：子代理结果走 async_delegation 的持久
+//     化 SQLite 投递队列（跨重启重试、保留 7 天），通过 gateway.wake 的 self-POST
+//     开一个全新的 turn 回到会话。那不属于本次 prompt.submit 的生命周期，30s 内
+//     根本等不到 —— hermes 自己也明确否定了这种 wall-clock 超时（async_delegation.py:
+//     "must never be killed for taking long"）。
+//
+// 故正确的边界就是 message.complete。本函数只剩两类出口：complete 到达 / 5min
+// 无事件（工具调用真卡死）。
+//
+// 已知缺口：background=true 异步子代理完成时，新 turn 会回到一个 OnTaskResult
+// 已 delete(running) 的 core —— 那份结果目前会被丢弃。30s 等待从没解决过它；
+// 要支持得让 core 能接受「对话的带外新消息」，属独立工作。
+func drainEvents(ctx context.Context, src eventSource, sessionID string, reporter a2a.StreamReporter) (string, string, string) {
 	var output strings.Builder
 	status := "completed"
 	errMsg := ""
 	idleTimeout := time.NewTimer(5 * time.Minute)
 	defer idleTimeout.Stop()
-	// message.complete 后进入"等待汇总轮"模式：idle 缩短到 30s。
-	// 如果 30s 内没有新事件（子代理汇总轮），才认为真正结束。
-	completeReceived := false
 
 	for {
 		select {
 		case <-ctx.Done():
 			return output.String(), "killed", "cancelled"
 		case <-idleTimeout.C:
-			if completeReceived {
-				// message.complete 后 30s 无新事件 → 真正结束。
-				return output.String(), status, errMsg
-			}
-			// 正常阶段 5min 无事件（工具调用卡住等）。
+			// 5min 无事件 = hermes 真卡住了（工具调用挂起等）。不是 complete 后的
+			// 续传窗口 —— 那个曾经由 30s 计时器处理，现已删（见函数注释）。
 			return output.String(), "failed", "hermes idle timeout (5min no events)"
-		case evt, ok := <-client.Events():
-			// 收到事件，重置空闲计时器（complete 后用 30s，否则 5min）。
-			if completeReceived {
-				idleTimeout.Reset(30 * time.Second)
-			} else {
-				idleTimeout.Reset(5 * time.Minute)
-			}
+		case evt, ok := <-src.Events():
+			// 收到事件即重置空闲计时器 —— 仍处于同一轮生成中。
+			idleTimeout.Reset(5 * time.Minute)
 			if !ok {
 				// 事件流关闭（连接断开）且没收到 complete：视为失败。
 				if errMsg == "" {
@@ -394,7 +412,7 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 			// 和主 sessionID 不同——不能过滤掉，否则看不到子代理的并行进度。
 			// gateway 是单连接的（每个 Dial 一个独立 WS），不会多路复用。
 			// 调试：打印所有事件类型
-			global.PRISM_LOG.Debug("hermes event", zap.String("type", evt.EventType), zap.Int("payloadLen", len(evt.Payload)))
+			logDebug("hermes event", zap.String("type", evt.EventType), zap.Int("payloadLen", len(evt.Payload)))
 			switch evt.EventType {
 			case evtMessageDelta, evtSubagentText:
 				// subagent.text 是子代理的流式输出，和 message.delta 一样处理
@@ -409,7 +427,7 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 			case evtToolStart:
 				tn := extractToolName(evt.Payload)
 				tp := extractToolPreview(evt.Payload)
-				global.PRISM_LOG.Info("hermes tool.start", zap.String("tool", tn))
+				logInfo("hermes tool.start", zap.String("tool", tn))
 				reporter.ToolUse(tn, tp)
 				// delegate_task 启动子代理——hermes 的 daemon 线程写 live transcript 到
 				// <workdir>/cache/delegation/live/deleg_*/task-*.log，但 WS 不推送。
@@ -423,7 +441,7 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 			case evtToolComplete:
 				tn := extractToolName(evt.Payload)
 				dur := extractToolDuration(evt.Payload)
-				global.PRISM_LOG.Info("hermes tool.complete", zap.String("tool", tn), zap.String("dur", dur))
+				logInfo("hermes tool.complete", zap.String("tool", tn), zap.String("dur", dur))
 				reporter.ToolUse(tn, "✓ "+dur)
 			case evtMessageComplete:
 				// complete 带完整 text，优先于增量累积。
@@ -442,14 +460,13 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 					errMsg = firstNonEmpty(p.Error, p.Text, "hermes reported message error")
 					return output.String(), status, errMsg
 				}
-				// 不立即返回——hermes 的 delegate_task 是异步的：
-				// 主代理可能先回复"已启动"+ complete，然后等子代理完成后做汇总轮。
-				// 标记 completeReceived=true，idle timer 切到 30s（见循环顶部）。
-				// 如果 30s 内有新事件（子代理汇总轮的 message.start/delta），继续 drain；
-				// 如果 30s 无事件，才认为真正结束。
-				completeReceived = true
-				idleTimeout.Reset(30 * time.Second)
-				global.PRISM_LOG.Info("hermes message.complete, waiting for possible subagent summary (30s idle)")
+				// complete 即本轮终结 —— 直接返回。
+				// 详见函数头注释：delegate_task 的同步/异步两条路径都不需要在 complete
+				// 后再等；那个曾经的 30s 窗口既白等（无子代理/同步子代理），又必然不够
+				// （异步走持久队列 + 新 turn），还把「答完即追问」误判成 409。
+				logInfo("hermes message.complete, returning",
+					zap.String("sid", sessionID), zap.Int("outputLen", output.Len()))
+				return output.String(), status, errMsg
 			case evtError:
 				var p struct {
 					Message string `json:"message"`
@@ -459,7 +476,7 @@ func drainEvents(ctx context.Context, client *GatewayClient, sessionID string, r
 			case evtGatewayReady, evtMessageStart:
 				// 生命周期信号，无操作。
 			}
-		case <-client.Done():
+		case <-src.Done():
 			if errMsg == "" {
 				errMsg = "gateway connection closed before completion"
 				status = "failed"

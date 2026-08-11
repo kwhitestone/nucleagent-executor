@@ -42,16 +42,29 @@ var attachClient = &http.Client{
 	Transport: &http.Transport{Proxy: nil},
 }
 
-// warnAttach 记一条附件相关的告警。
+// warnAttach / logDebug / logInfo 都是 global.PRISM_LOG 的 nil 守卫包装。
 //
-// 包一层是因为 global.PRISM_LOG 只在框架启动后才被赋值：附件失败是**错误路径**，
-// 若这条路径本身因为 logger 为 nil 而 panic，就会把「一个附件拉不到」升级成
-// 「整个任务崩掉」—— 正好是这段代码想要避免的。
+// 框架只在启动后才给 global.PRISM_LOG 赋值；单测不初始化它时直接调会 nil panic。
+// 尤其 drainEvents 的 Debug 在每条事件上都打 —— 必须走守卫。
 func warnAttach(msg string, fields ...zap.Field) {
 	if global.PRISM_LOG == nil {
 		return
 	}
 	global.PRISM_LOG.Warn(msg, fields...)
+}
+
+func logDebug(msg string, fields ...zap.Field) {
+	if global.PRISM_LOG == nil {
+		return
+	}
+	global.PRISM_LOG.Debug(msg, fields...)
+}
+
+func logInfo(msg string, fields ...zap.Field) {
+	if global.PRISM_LOG == nil {
+		return
+	}
+	global.PRISM_LOG.Info(msg, fields...)
 }
 
 // attachAll 把附件逐个注入 session，返回需要追加到 prompt 的引用文本。
