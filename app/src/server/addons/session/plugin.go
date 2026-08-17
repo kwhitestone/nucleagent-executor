@@ -1,6 +1,6 @@
 package session
 
-import "whitestone.top/prism-fusion/plugin"
+import "github.com/kwhitestone/prism-fusion/plugin"
 
 // Default 默认会话存储。骨架阶段 file 为空（仅内存）；
 // 真实路径由 config.nucleagent.session.file 注入（TODO）。

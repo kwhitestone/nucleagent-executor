@@ -20,8 +20,8 @@ import (
 	"nucleagent-executor/internal/runtime"
 	"nucleagent-executor/internal/wsclient"
 
-	"whitestone.top/prism-fusion/core"
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/core"
+	"github.com/kwhitestone/prism-fusion/global"
 
 	// executor 不导入框架内置 auth/rbac addons（不暴露 auth 路由、不连数据库）；
 	// 仅注册自身 backend/session addons，供 core 经 WebSocket 接入。

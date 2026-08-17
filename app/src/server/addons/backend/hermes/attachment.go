@@ -22,7 +22,7 @@ import (
 
 	"github.com/nucleagent/nucleagent-shared/a2a"
 	"go.uber.org/zap"
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // maxAttachmentBytes 单个附件的下载上限（20MB）。

@@ -1,6 +1,6 @@
 package backend
 
-import "whitestone.top/prism-fusion/plugin"
+import "github.com/kwhitestone/prism-fusion/plugin"
 
 // BackendPlugin 执行后端插件（注册表 + runner 的宿主）。
 // Executor 不对前端暴露 HTTP，故无路由/模型；具体后端在子包自注册到 Default。

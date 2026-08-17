@@ -25,7 +25,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // Sidecar hermes→core LLM Proxy 的本地反向代理。

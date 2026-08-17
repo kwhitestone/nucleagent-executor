@@ -25,7 +25,7 @@ import (
 	"github.com/nucleagent/nucleagent-shared/llm"
 	"go.uber.org/zap"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 
 	"nucleagent-executor/addons/backend"
 )

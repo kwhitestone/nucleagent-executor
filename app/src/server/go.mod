@@ -5,9 +5,9 @@ go 1.25
 require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/kwhitestone/prism-fusion v0.0.0
 	github.com/nucleagent/nucleagent-shared v0.0.0
 	go.uber.org/zap v1.26.0
-	whitestone.top/prism-fusion v0.0.0
 )
 
 require (
@@ -78,6 +78,6 @@ require (
 )
 
 replace (
+	github.com/kwhitestone/prism-fusion => ../../../../prism-fusion/src/server
 	github.com/nucleagent/nucleagent-shared => ../../../../nucleagent-shared
-	whitestone.top/prism-fusion => ../../../../prism-fusion/src/server
 )

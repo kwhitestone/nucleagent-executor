@@ -22,7 +22,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"whitestone.top/prism-fusion/global"
+	"github.com/kwhitestone/prism-fusion/global"
 )
 
 // readySentinel hermes serve 启动完成后在 stdout 打印的端口通告行前缀。
