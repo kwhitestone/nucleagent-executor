@@ -143,6 +143,21 @@ func runExecutor(ctx context.Context, cfg *config.Config) {
 	ws := wsclient.NewClient(wsURL, cfg.ExecutorToken, handshake, rt)
 	rt.SetSender(ws) // 回填真实 sender
 
+	// 带外续轮 hooks：hermes delegation watcher 依赖的能力（通知 core 开启续轮、
+	// 构造流式上报器、回报最终结果）。sender 就绪后才能注入。
+	hermes.SetWatcherLifetime(ctx)
+	hermes.SetWatchHooks(&hermes.DelegationWatchHooks{
+		StartContinuation: func(cctx context.Context, convID uint) (string, string, error) {
+			resp, err := ec.StartAsyncContinuation(cctx, convID)
+			if err != nil {
+				return "", "", err
+			}
+			return resp.Data.Key, resp.Data.StepID, nil
+		},
+		NewReporter:  rt.NewStreamReporter,
+		ReportResult: rt.ReportTaskResult,
+	})
+
 	// 运行 WS（含自动重连），直到 ctx 取消。
 	reconnect := parseDuration(cfg.RegisterInterval, 5*time.Second)
 	if err := ws.Run(ctx, reconnect); err != nil {

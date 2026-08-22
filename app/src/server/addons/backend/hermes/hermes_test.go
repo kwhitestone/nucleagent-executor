@@ -49,7 +49,7 @@ func TestDrainEventsReturnsOnComplete(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	out, status, errMsg := drainEvents(ctx, src, "s1", noopReporter{})
+	out, status, errMsg, _ := drainEvents(ctx, src, "s1", noopReporter{})
 	elapsed := time.Since(start)
 
 	if status != "completed" {
@@ -75,7 +75,7 @@ func TestDrainEventsIdleTimeoutStillWorks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	_, status, errMsg := drainEvents(ctx, src, "s1", noopReporter{})
+	_, status, errMsg, _ := drainEvents(ctx, src, "s1", noopReporter{})
 
 	// ctx 先于 5min idle 触发 → 走 ctx.Done() 分支，status=killed。
 	if status != "killed" {
@@ -98,7 +98,7 @@ func TestDrainEventsConnectionClosedBeforeComplete(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, status, _ := drainEvents(ctx, src, "s1", noopReporter{})
+	_, status, _, _ := drainEvents(ctx, src, "s1", noopReporter{})
 
 	if status != "failed" {
 		t.Errorf("status = %q, want failed (connection closed before complete)", status)

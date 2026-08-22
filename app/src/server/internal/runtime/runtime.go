@@ -221,6 +221,26 @@ func (r *Runtime) KillByConversation(cid uint) bool {
 }
 
 // RunningCount 当前运行中 session 数。
+// NewStreamReporter 构造绑定持久 sender 的流式上报器。供 hermes delegation
+// watcher 的带外续轮使用（turn 2 的事件流走与正常 Run 相同的通道）。
+func (r *Runtime) NewStreamReporter(conversationID uint, stepID string) a2a.StreamReporter {
+	return newCloudReporter(r.sender, conversationID, stepID)
+}
+
+// ReportTaskResult 回报任务最终结果（不带 a2a_request 的 requestID —— 带外续轮
+// 没有对应请求；core 的 OnTaskResult 按 conversationID 路由，不依赖 requestID）。
+func (r *Runtime) ReportTaskResult(conversationID uint, result a2a.ExecutionResult, settled bool) {
+	resultBody, _ := json.Marshal(result)
+	_ = r.sender.SendWithRequest(a2a.EnvA2ATaskResult, "", a2a.A2ATaskResultPayload{
+		ConversationID: conversationID,
+		StepID:         result.StepID,
+		Status:         result.Status,
+		Body:           resultBody,
+		// settled = 后台委托链终结，core 清 delegationPending 标志。
+		DelegationSettled: settled,
+	})
+}
+
 func (r *Runtime) RunningCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

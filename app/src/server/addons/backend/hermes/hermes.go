@@ -35,13 +35,14 @@ const Capability = "hermes"
 
 // Config 由 main 在启动期经 Configure 注入。
 type Config struct {
-	Bin      string   // hermes 可执行文件
-	Workdir  string   // HERMES_HOME
-	Host     string   // hermes serve 监听 host
-	CoreURL  string   // core API 地址
-	Model    string   // LLM 模型名
-	Sidecar  *Sidecar // hermes→core LLM Proxy 的本地反代（常驻，按 Run 注入 key）
-	FetchKey func() (string, error) // 向 core 换 TempLLMKey（每次 Run 调）
+	Bin        string              // hermes 可执行文件
+	Workdir    string              // HERMES_HOME
+	Host       string              // hermes serve 监听 host
+	CoreURL    string              // core API 地址
+	Model      string              // LLM 模型名
+	Sidecar    *Sidecar            // hermes→core LLM Proxy 的本地反代（常驻，按 Run 注入 key）
+	FetchKey   func() (string, error) // 向 core 换 TempLLMKey（每次 Run 调）
+	WatchHooks *DelegationWatchHooks // 带外续轮依赖的外部能力（nil = 不启用 watcher）
 }
 
 // conf 包级配置，由 Configure 注入。
@@ -128,14 +129,24 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 	if err != nil {
 		return fail(err.Error())
 	}
-	defer client.Close()
+	// 正常路径 Run 结束即关 WS、清 sidecar key。例外：本轮 delegate_task 且正常
+	// 完成时，client 移交给 delegation watcher（turn 2 只在 WS 存活时触发）。
+	// 此时也**不能清 key** —— 后台子代理的 LLM 调用还在走 sidecar，清了就 401
+	//（对话级 key 会被 core 撤销是既定事实，watcher 启动时会立即换服务级 key 覆盖）。
+	handoffToWatcher := false
 	defer func() {
-		if conf.Sidecar != nil {
+		if !handoffToWatcher {
+			client.Close()
+		}
+		if conf.Sidecar != nil && !handoffToWatcher {
 			conf.Sidecar.ClearActive()
 		}
 	}()
 
 	// 4. session.resume（增量）或 create + 全量历史注入。
+	//    新 Run 的 WS 会接管 session transport，同 conv 旧 watcher 从此收不到
+	//    事件——先取消它，避免空等 7 天。
+	CancelWatcher(req.ConversationID)
 	global.PRISM_LOG.Info("hermes Run: resumeOrCreateSession", zap.Uint("conv", req.ConversationID))
 	sessionID, err := resumeOrCreateSession(ctx, client, req)
 	if err != nil {
@@ -169,7 +180,7 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 	global.PRISM_LOG.Info("hermes Run: prompt.submit sent, draining events")
 
 	// 7. 读事件流直到完成/取消。
-	output, status, errMsg := drainEvents(ctx, client, sessionID, reporter)
+	output, status, errMsg, delegated := drainEvents(ctx, client, sessionID, reporter)
 	reporter.Flush()
 
 	if ctx.Err() != nil {
@@ -177,6 +188,15 @@ func (b *HermesBackend) Run(ctx context.Context, req *a2a.ExecutionRequest, repo
 	}
 	if status == "error" || errMsg != "" {
 		return a2a.ExecutionResult{StepID: req.StepID, Status: "failed", Error: errMsg}
+	}
+	// delegate_task 且正常完成：WS 移交 watcher 监听 turn 2（后台子代理汇总轮）。
+	// hermes 顶层委托无条件后台化（background 参数已废弃），这里必须接住。
+	// 另外：core 下发 x-delegation-watch（该对话有**跨轮在飞**的后台委托，标志
+	// 持久化在 core DB）时也要接 —— turn 1 派的子代理可能还没完，中间的追问轮
+	// 杀掉了旧 watcher，这轮结束把它接回来。executor 无状态，全靠这个头。
+	if (delegated || delegationWatchRequested(req)) && conf.WatchHooks != nil {
+		handoffToWatcher = true
+		go StartDelegationWatcher(watchParentCtx(), req.ConversationID, sessionID, client, *conf.WatchHooks)
 	}
 	return a2a.ExecutionResult{StepID: req.StepID, Status: "completed", Output: output}
 }
@@ -382,21 +402,24 @@ type eventSource interface {
 // 已知缺口：background=true 异步子代理完成时，新 turn 会回到一个 OnTaskResult
 // 已 delete(running) 的 core —— 那份结果目前会被丢弃。30s 等待从没解决过它；
 // 要支持得让 core 能接受「对话的带外新消息」，属独立工作。
-func drainEvents(ctx context.Context, src eventSource, sessionID string, reporter a2a.StreamReporter) (string, string, string) {
+// drainEvents 读事件流直到本轮完成/取消。第 4 个返回值表示本轮是否用了
+// delegate_task（后台委托）—— caller 据此决定是否把 WS 移交 watcher 等 turn 2。
+func drainEvents(ctx context.Context, src eventSource, sessionID string, reporter a2a.StreamReporter) (string, string, string, bool) {
 	var output strings.Builder
 	status := "completed"
 	errMsg := ""
+	delegated := false
 	idleTimeout := time.NewTimer(5 * time.Minute)
 	defer idleTimeout.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return output.String(), "killed", "cancelled"
+			return output.String(), "killed", "cancelled", delegated
 		case <-idleTimeout.C:
 			// 5min 无事件 = hermes 真卡住了（工具调用挂起等）。不是 complete 后的
 			// 续传窗口 —— 那个曾经由 30s 计时器处理，现已删（见函数注释）。
-			return output.String(), "failed", "hermes idle timeout (5min no events)"
+			return output.String(), "failed", "hermes idle timeout (5min no events)", delegated
 		case evt, ok := <-src.Events():
 			// 收到事件即重置空闲计时器 —— 仍处于同一轮生成中。
 			idleTimeout.Reset(5 * time.Minute)
@@ -406,7 +429,7 @@ func drainEvents(ctx context.Context, src eventSource, sessionID string, reporte
 					errMsg = "gateway connection closed before completion"
 					status = "failed"
 				}
-				return output.String(), status, errMsg
+				return output.String(), status, errMsg, delegated
 			}
 			// 子代理（subagent/delegate）的事件用 child session id 推送，
 			// 和主 sessionID 不同——不能过滤掉，否则看不到子代理的并行进度。
@@ -433,6 +456,7 @@ func drainEvents(ctx context.Context, src eventSource, sessionID string, reporte
 				// <workdir>/cache/delegation/live/deleg_*/task-*.log，但 WS 不推送。
 				// 启动 tail goroutine 读 log 文件，把子代理输出推给前端。
 				if tn == "delegate_task" {
+					delegated = true
 					tailCtx, tailCancel := context.WithCancel(ctx)
 					go tailDelegationLogs(tailCtx, reporter)
 					// 在 tool.complete 或 drainEvents 结束时 cancel
@@ -458,7 +482,7 @@ func drainEvents(ctx context.Context, src eventSource, sessionID string, reporte
 				if p.Status == "error" || p.Error != "" {
 					status = "error"
 					errMsg = firstNonEmpty(p.Error, p.Text, "hermes reported message error")
-					return output.String(), status, errMsg
+					return output.String(), status, errMsg, delegated
 				}
 				// complete 即本轮终结 —— 直接返回。
 				// 详见函数头注释：delegate_task 的同步/异步两条路径都不需要在 complete
@@ -466,13 +490,13 @@ func drainEvents(ctx context.Context, src eventSource, sessionID string, reporte
 				// （异步走持久队列 + 新 turn），还把「答完即追问」误判成 409。
 				logInfo("hermes message.complete, returning",
 					zap.String("sid", sessionID), zap.Int("outputLen", output.Len()))
-				return output.String(), status, errMsg
+				return output.String(), status, errMsg, delegated
 			case evtError:
 				var p struct {
 					Message string `json:"message"`
 				}
 				_ = json.Unmarshal(evt.Payload, &p)
-				return output.String(), "error", firstNonEmpty(p.Message, "hermes gateway error")
+				return output.String(), "error", firstNonEmpty(p.Message, "hermes gateway error"), delegated
 			case evtGatewayReady, evtMessageStart:
 				// 生命周期信号，无操作。
 			}
@@ -481,7 +505,7 @@ func drainEvents(ctx context.Context, src eventSource, sessionID string, reporte
 				errMsg = "gateway connection closed before completion"
 				status = "failed"
 			}
-			return output.String(), status, errMsg
+			return output.String(), status, errMsg, delegated
 		}
 	}
 }

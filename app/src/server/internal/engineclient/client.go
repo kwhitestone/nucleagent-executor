@@ -143,6 +143,50 @@ func (c *Client) tryRegister(ctx context.Context, url string, body []byte) (stri
 	return out.Data.WSURL, nil
 }
 
+// AsyncContinuationResponse core 的 async-continuation/start 端点响应。
+type AsyncContinuationResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Key          string `json:"key"`
+		StepID       string `json:"stepId"`
+		DelegationID string `json:"delegationId"`
+		SenderSlug   string `json:"senderSlug"`
+	} `json:"data"`
+}
+
+// StartAsyncContinuation 通知 core 开启带外续轮（delegate_task 后台完成后的
+// 汇总 turn）。core 重建 runState + 签新 TempLLMKey，返回给 watcher 用于
+// 注入 sidecar 和回报事件流。
+func (c *Client) StartAsyncContinuation(ctx context.Context, conversationID uint) (*AsyncContinuationResponse, error) {
+	body, _ := json.Marshal(map[string]any{"conversationId": conversationID})
+	url := c.coreURL + "/api/v1/addons/s2s/executor/async-continuation/start"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Executor-Token", c.executorToken)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("async-continuation request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("async-continuation http %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var out AsyncContinuationResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("async-continuation unmarshal: %w", err)
+	}
+	if out.Code != 0 || out.Data.StepID == "" {
+		return nil, fmt.Errorf("async-continuation rejected: code=%d msg=%s", out.Code, out.Message)
+	}
+	return &out, nil
+}
+
 // truncate 截断字符串到 max 字节，超出加省略号。
 func truncate(s string, max int) string {
 	if len(s) <= max {
